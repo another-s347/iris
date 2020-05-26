@@ -57,7 +57,8 @@ class IrisOptimizer:
         self.context_id = context_id
         
         self.model_parameters = [self.get_parameter(m) for m in self.models]
-        self.model_parameters_id = [m.id for m in self.model_parameters]
+        self.model_parameters = self.ctx.client_wrapper[node].inner.batch_wait(self.model_parameters)
+        self.model_parameters_id = [ObjectId(m.id()) for m in self.model_parameters]
 
         parameters = self.ctx.client_wrapper[node].apply(
             func=lambda *x: functools.reduce(lambda a,b:a+b,x),
@@ -108,15 +109,14 @@ class IrisOptimizer:
 
     def get_parameter(self, model):
         if model.node == self.node:
-            return self.ctx.client_wrapper[self.node].get_parameter(model.id)
+            return self.ctx.client_wrapper[self.node].get_parameter_async(model.id)
         else:
-            r = self.ctx.client_wrapper[self.node].inner.torch_call(
+            return self.ctx.client_wrapper[self.node].inner.torch_call_async(
                 target_node=model.node,
                 object_id=model.id.id,
                 torch_func="torch_GetParameters",
                 to_here=True
             )
-            return IrisObject(r, self.node, self.ctx)
 
 class IrisObject:
     def __init__(self, inner, node, ctx):
@@ -261,7 +261,10 @@ class IrisClientWrapper:
     def get_parameter(self, object_id):
         r = self.inner.get_parameter(object_id.id)
         return IrisObject(r, self.node, self.ctx)
-    
+
+    def get_parameter_async(self, object_id):
+        return self.inner.get_parameter_async(object_id.id)
+
     def apply(self, func, args, kwargs, recursive):
         args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.apply(

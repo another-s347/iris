@@ -63,6 +63,7 @@ impl IrisContextInternal {
         Ok(crate::IrisClientInternal {
             runtime_handle: self.runtime.handle().clone(),
             client: client.unwrap(),
+            async_tasks: Default::default()
         })
     }
 

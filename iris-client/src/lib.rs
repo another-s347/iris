@@ -1,7 +1,8 @@
 #![feature(async_closure)]
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes,PyList};
+use pyo3::pyclass::PyClass;
 use rayon::prelude::*;
 use std::fs;
 use std::path::PathBuf;
@@ -19,6 +20,8 @@ use tower::service_fn;
 use tonic::transport::{Endpoint, Uri};
 use std::convert::TryFrom;
 use std::sync::Arc;
+use futures::future::join_all;
+use uuid;
 
 type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
 type tonicResponseResult<T> = Result<tonic::Response<T>, tonic::Status>;
@@ -40,9 +43,22 @@ struct WordCounter {
 #[pyclass(module = "word_count")]
 struct IrisClientInternal {
     pub runtime_handle: tokio::runtime::Handle,
-    pub client: RpcClient
+    pub client: RpcClient,
+    pub async_tasks: HashMap<uuid::Uuid, AsyncIrisObjectTask>
 }
 
+#[pyclass(module = "word_count")]
+struct AsyncIrisObjectTask  
+{
+    pub inner: JoinHandle<IrisObjectInternal>
+}
+
+#[pyclass(module = "word_count")]
+#[derive(Clone)]
+struct AsyncTaskKey
+{
+    uuid: uuid::Uuid
+}
 #[pyclass(module = "word_count")]
 struct IrisObjectInternal {
     pub inner: Arc<GuardedIrisObject>
@@ -205,6 +221,22 @@ impl IrisClientInternal {
         }
     }
 
+    fn _torch_call_async(&mut self, request: TorchRpcCallRequest) -> JoinHandle<IrisObjectInternal> {
+        let mut client = self.client.clone();
+        let runtime_handle = self.runtime_handle.clone();
+        let task_handle = self.runtime_handle.spawn(async move {
+            let result = client.torch_call(tonic::Request::new(request)).await;
+            IrisObjectInternal {
+                inner: Arc::new(GuardedIrisObject {
+                    client,
+                    runtime_handle,
+                    node_ref:result.map(|x|x.into_inner()).unwrap()
+                })
+            }
+        });
+        task_handle
+    }
+
     fn _get_parameter(&mut self, request: GetParameterRequest) -> IrisObjectInternal {
         let task_handle = self.runtime_handle.block_on(
             self.client.get_parameter(tonic::Request::new(request))
@@ -217,6 +249,22 @@ impl IrisClientInternal {
                 node_ref:task_handle.map(|x|x.into_inner()).unwrap()
             })
         }
+    }
+
+    fn _get_parameter_async(&mut self, request: GetParameterRequest) -> JoinHandle<IrisObjectInternal> {
+        let mut client = self.client.clone();
+        let runtime_handle = self.runtime_handle.clone();
+        let task_handle = self.runtime_handle.spawn(async move {
+            let result = client.get_parameter(tonic::Request::new(request)).await;
+            IrisObjectInternal {
+                inner: Arc::new(GuardedIrisObject {
+                    client,
+                    runtime_handle,
+                    node_ref:result.map(|x|x.into_inner()).unwrap()
+                })
+            }
+        });
+        task_handle
     }
 
     fn _apply(&mut self, request: ApplyRequest) -> IrisObjectInternal {
@@ -236,6 +284,23 @@ impl IrisClientInternal {
 
 #[pymethods]
 impl IrisClientInternal {
+    fn batch_wait<'p>(&mut self, py:Python<'p>, tasks: Vec<AsyncTaskKey>) -> Vec<IrisObjectInternal> {
+        let mut t = vec![];
+        for key in tasks {
+            if let Some(task) = self.async_tasks.remove(&key.uuid) {
+                t.push(task);
+            }
+        }
+        py.allow_threads(||{
+            self.runtime_handle.block_on(
+                join_all(t.drain(0..).map(|x|x.inner))
+                .map(|mut x|{
+                    x.drain(0..).map(|i|i.unwrap()).collect()
+                })
+            )
+        })
+    }
+
     fn apply(&mut self, py:Python<'_>, func:Vec<u8>, b_args: Option<&[u8]>, b_kwargs: Option<&[u8]>, recursive:Option<bool>) -> IrisObjectInternal {
         let arg = new_arg_request(b_args, b_kwargs, recursive);
         let request = ApplyRequest {
@@ -254,6 +319,20 @@ impl IrisClientInternal {
         py.allow_threads(||{
             self._get_parameter(request)
         })
+    }
+
+    fn get_parameter_async(&mut self, py:Python<'_>, object_id:u64) -> AsyncTaskKey {
+        let request = GetParameterRequest {
+            object_id
+        };
+        let task = AsyncIrisObjectTask {
+            inner: self._get_parameter_async(request)
+        };
+        let key = uuid::Uuid::new_v4();
+        self.async_tasks.insert(key, task);
+        AsyncTaskKey {
+            uuid: key
+        }
     }
 
     fn create_object(&mut self, py:Python<'_>,module: &str, qualname: &str, b_args: Option<&[u8]>, b_kwargs: Option<&[u8]>, recursive: Option<bool>) -> PyResult<IrisObjectInternal> {
@@ -299,6 +378,36 @@ impl IrisClientInternal {
             to_here
         };
         Ok(py.allow_threads(||self._torch_call(request)))
+    }
+
+    fn torch_call_async(
+        &mut self, py:Python<'_>, 
+        target_node: &str,
+        object_id: u64, 
+        attr: Option<String>, 
+        b_args: Option<&[u8]>, 
+        b_kwargs: Option<&[u8]>, 
+        recursive: Option<bool>,
+        torch_func: Option<&str>,
+        to_here: bool
+    ) -> AsyncTaskKey {
+        let arg = new_arg_request(b_args, b_kwargs, recursive);
+        let request = TorchRpcCallRequest {
+            target_node: target_node.to_owned(),
+            object_id,
+            attr: attr.unwrap_or_default(),
+            arg,
+            torch_func: torch_func.unwrap_or_default().to_owned(),
+            to_here
+        };
+        let task = AsyncIrisObjectTask {
+            inner: self._torch_call_async(request)
+        };
+        let key = uuid::Uuid::new_v4();
+        self.async_tasks.insert(key, task);
+        AsyncTaskKey {
+            uuid: key
+        }
     }
 }
 
