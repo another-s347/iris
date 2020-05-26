@@ -1,0 +1,10 @@
+**/target/**/*
+*.pyc
+**/.vscode/**/*
+**/.idea/**/*
+**/.venv/**/*
+*.so
+**/.venv
+data/**/*
+dataset/**/*
+Cargo.lock

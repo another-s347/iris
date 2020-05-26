@@ -144,6 +144,9 @@ class Context:
     def __init__(self):
         super().__init__()
 
+    def __await__(self):
+        yield [1]
+
 class AsyncRemoteObject:
     def __init__(self, channel, node, master, inner: Union[NodeObjectRef, NodeObject]):
         super().__init__()
@@ -197,14 +200,28 @@ class AsyncRemoteTask:
         self.task = task
         self.node = node
 
-    async def __call__(self, *args, **kwargs) -> AsyncRemoteObject:
-        inner = await self.task()
-        return await inner(*args, **kwargs)
+    def __call__(self, *args, **kwargs):
+        async def _r():
+            inner = await self.task()
+            return await inner(*args, **kwargs)
+        return ChainableTask(_r())
 
+class ChainableTask:
+    def __init__(self, task):
+        self.task = task
+
+    def __await__(self):
+        return self.task.__await__()
+    
+    def __getattr__(self, attr):
+        async def new_task():
+            result = await self.task
+            
+        pass
 
 async def main(args):
     master = "node0"
-    channel = Channel(path=f"/tmp/iris-tmp-node0-0.sock")
+    channel = Channel(path=f"tmp/iris-tmp-node0-0.sock")
     channel2 = Channel(path=f"/tmp/iris-tmp-node1-1.sock")
     greeter = GreeterStub(channel)
     greeter2 = GreeterStub(channel2)
@@ -252,11 +269,12 @@ async def main(args):
         result2 = await model2.forward(torch.zeros(10, 1))
         # result = await model.forward(result)
         result = await result.add(result2)
-        result = await result.to_here()
-        result = await result.sum()
+        test = result.to_here().sum()
+        print(test)
+        # result = await result.to_here().sum()
 
-        await optim.backward(result)
-        await optim.step()
+        # await optim.backward(result)
+        # await optim.step()
 
     print("what", result)
 
@@ -264,7 +282,12 @@ async def main(args):
 
     channel.close()
 
+async def what():
+    c = Context()
+    test = await c
+    print(test)
 
 if __name__ == '__main__':
     args = parser.parse_args()
     asyncio.run(main(args))
+    # asyncio.run(what())

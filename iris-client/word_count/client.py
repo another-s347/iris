@@ -1,0 +1,291 @@
+from .word_count import IrisContextInternal
+import pickle
+import sys
+import dill
+import functools
+import torch.distributed.autograd as dist_autograd
+from torch import optim
+from torch.distributed.optim import DistributedOptimizer
+from proto.helloworld.helloworld_pb2 import *
+
+class ObjectId:
+    def __init__(self, id):
+        super().__init__()
+        self.id = id
+    
+    def __int__(self):
+        return self.id
+
+class IrisContext:
+    def __init__(self):
+        super().__init__()
+        self.inner = IrisContextInternal()
+        self.client_wrapper = {}
+    
+    def setup(self):
+        self.client_wrapper["node0"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node0-0.sock"), "node0", self)
+        self.client_wrapper["node1"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node1-1.sock"), "node1", self)
+        self.client_wrapper["node2"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node2-2.sock"), "node2", self)
+        self.client_wrapper["node0"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=0)
+        self.client_wrapper["node1"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=1)
+        self.client_wrapper["node2"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=2)
+
+    def create_object(self, node, module, recursive, *args, **kwargs):
+        inner_client = self.client_wrapper[node]
+        return inner_client.create_object(module, recursive, *args, **kwargs)
+
+class IrisGradContext:
+    def __init__(self, ctx, node):
+        super().__init__()
+        self.ctx = ctx
+        self.node = node
+
+    def __enter__(self):
+        self.torch_autograd_context = self.ctx.client_wrapper[self.node].create_object(dist_autograd.context, False)
+        self.context_id = self.torch_autograd_context.__enter__()
+        return self.context_id
+
+    def __exit__(self, type, value, track):
+        self.torch_autograd_context.__exit__(type, value, track)
+
+class IrisOptimizer:
+    def __init__(self, ctx, node, models, context_id):
+        super().__init__()
+        self.node = node
+        self.models = models
+        self.ctx = ctx
+        self.context_id = context_id
+        
+        self.model_parameters = [self.get_parameter(m) for m in self.models]
+        self.model_parameters_id = [m.id for m in self.model_parameters]
+
+        parameters = self.ctx.client_wrapper[node].apply(
+            func=lambda *x: functools.reduce(lambda a,b:a+b,x),
+            args=(self.model_parameters_id),
+            kwargs=None,
+            recursive=True
+        )
+        b = optim.SGD
+        self.optimizer = self.ctx.client_wrapper[node].create_object(
+            DistributedOptimizer,
+            False,
+            ModuleRef(module=b.__module__,qualname=b.__qualname__), 
+            parameters,
+            lr = 0.1
+        )
+
+    def get_loss(self, loss):
+        if loss.node == self.node:
+            return loss
+        r_a = self.ctx.client_wrapper[self.node].inner.torch_call(
+            target_node=loss.node,
+            object_id=loss.id.id,
+            torch_func="torch_GetObject",
+            to_here=True
+        )
+        return IrisObject(r_a, self.node, self.ctx)
+    
+    def backward(self, loss):
+        if type(loss) is list:
+            loss = list(map(self.get_loss, loss))
+            loss = list(map(lambda x:x.id, loss))
+        else:
+            loss = self.get_loss(loss)
+            loss = [loss.id]
+        args = (self.context_id.id, loss)
+        module = dist_autograd.backward
+        self.ctx.client_wrapper[self.node].inner.create_object(
+            module = module.__module__,
+            qualname = module.__name__,
+            b_args = pickle.dumps(args) if args else None,
+            b_kwargs = None,
+            recursive = True,
+        )
+    
+    def step(self):
+        self.optimizer.step(self.context_id)
+
+
+    def get_parameter(self, model):
+        if model.node == self.node:
+            return self.ctx.client_wrapper[self.node].get_parameter(model.id)
+        else:
+            r = self.ctx.client_wrapper[self.node].inner.torch_call(
+                target_node=model.node,
+                object_id=model.id.id,
+                torch_func="torch_GetParameters",
+                to_here=True
+            )
+            return IrisObject(r, self.node, self.ctx)
+
+class IrisObject:
+    def __init__(self, inner, node, ctx):
+        super().__init__()
+        self.inner = inner
+        self.node = node
+        self.ctx = ctx
+        self.id = ObjectId(inner.id())
+
+    """
+    Get a copy of object in remote node
+    """
+    def get(self):
+        data = self.inner.get_value()
+        return pickle.loads(data)
+
+    def __call__(self, *args, **kwargs):
+        args = retrieve_args(self, self.node, self.ctx, args)
+        r = self.inner.call(
+            b_args=pickle.dumps(args) if args else None,
+            b_kwargs=pickle.dumps(kwargs) if kwargs else None,
+            recursive=False
+        )
+        return IrisObject(r, self.node, self.ctx)
+    
+    def _call_with_attr(self, attr, args, kwargs=None):
+        args = retrieve_args(self, self.node, self.ctx, args)
+        r = self.inner.call(
+            b_args=pickle.dumps(args) if args else None,
+            b_kwargs=pickle.dumps(kwargs) if kwargs else None,
+            recursive=False,
+            attr=attr,
+        )
+        return IrisObject(r, self.node, self.ctx)
+    
+    def keys(self):
+        return self._call_with_attr('keys', args=None)
+
+    def __getattr__(self, attr):
+        r = self.inner.get_attr(attr)
+        return IrisObject(r, self.node, self.ctx)
+
+    def __add__(self, other):
+        return self._call_with_attr('__add__', args=(other,))
+
+    def __sub__(self, other):
+        return self._call_with_attr('__sub__', args=(other,))
+
+    def __mul__(self, other):
+        return self._call_with_attr('__mul__', args=(other,))
+
+    def __div__(self, other):
+        return self._call_with_attr('__div__', args=(other,))
+    # TODO: Add more magic methods
+
+    def __len__(self):
+        return self._call_with_attr('__len__', args=None)
+
+    def __iter__(self):
+        return self._call_with_attr('__iter__', args=None)
+    
+    def __getitem__(self, key):
+        return self._call_with_attr('__getitem__', args=(key,))
+    
+    def __setitem__(self, key, value):
+        return self._call_with_attr('__setitem__', args=(key, value,))
+    
+    def __delitem__(self, key):
+        return self._call_with_attr('__delitem__', args=(key,))
+
+    def __reversed__(self):
+        return self._call_with_attr('__reversed__', args=None)
+    
+    def __contains__(self, item):
+        return self._call_with_attr('__contains__', args=(item,))
+    
+    def __next__(self):
+        return self._call_with_attr('__next__', args=None)
+
+    def __index__(self):
+        return self._call_with_attr('__index__', args=None).get()
+
+    # TODO: Clean up memory in server
+    def __del__(self):
+        pass
+        # print("IrisObject deleted")
+
+class IrisModel:
+    def __init__(self, model, ctx, optimizer):
+        super().__init__()
+        self.model = model
+        self.ctx = ctx
+        self.optimizer = optimizer
+        self.train = True
+    
+    def forward(self, *args, **kwargs):
+        if self.train:
+            args = retrieve_args(self, self.optimizer.node, self.ctx, args)
+            r_a = self.ctx.client_wrapper[self.optimizer.node].inner.torch_call(
+                target_node=self.model.node,
+                object_id=self.model.id.id,
+                to_here=True,
+                b_args=pickle.dumps(args) if args else None,
+                b_kwargs=pickle.dumps(kwargs) if kwargs else None
+            )
+            return IrisObject(r_a, self.optimizer.node, self.ctx)
+        else:
+            return self.model.forward(*args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+
+class IrisClientWrapper:
+    def __init__(self, inner, node, ctx):
+        super().__init__()
+        self.inner = inner
+        self.node = node
+        self.ctx = ctx
+    
+    def create_object(self, module, recursive, *args, **kwargs):
+        args = retrieve_args(self, self.node, self.ctx, args)
+        r = self.inner.create_object(
+            module = module.__module__,
+            qualname = module.__qualname__,
+            b_args = pickle.dumps(args) if args else None,
+            b_kwargs = pickle.dumps(kwargs) if kwargs else None,
+            recursive = recursive,
+        )
+        return IrisObject(r, self.node, self.ctx)
+    
+    def torch_call(self):
+        pass
+
+    def get_parameter(self, object_id):
+        r = self.inner.get_parameter(object_id.id)
+        return IrisObject(r, self.node, self.ctx)
+    
+    def apply(self, func, args, kwargs, recursive):
+        args = retrieve_args(self, self.node, self.ctx, args)
+        r = self.inner.apply(
+            func=dill.dumps(func),
+            b_args=pickle.dumps(args) if args else None,
+            b_kwargs=pickle.dumps(kwargs) if kwargs else None,
+            recursive=recursive
+        )
+        return IrisObject(r, self.node, self.ctx)
+    
+def retrieve_args(self, node, ctx, args, recursive=False, cls=tuple):
+    if args is None:
+        return None
+    a = []
+    for arg in args:
+        if type(arg) is IrisObject and arg.node != node:
+            r_a = ctx.client_wrapper[node].inner.torch_call(
+                target_node=arg.node,
+                object_id=arg.id.id,
+                torch_func="torch_GetObject",
+                to_here=True
+            )
+            a.append(ObjectId(r_a.id()))
+        elif type(arg) is IrisObject:
+            a.append(arg.id)
+        elif recursive and type(arg) is list:
+            a.append(retrieve_args(self, node, ctx, a, recursive, list))
+        elif recursive and type(arg) is dict:
+            raise NotImplementedError()
+        elif recursive and type(arg) is tuple:
+            a.append(retrieve_args(self, node, ctx, recursive, a))
+        else:
+            a.append(arg)
+    return cls(a)
