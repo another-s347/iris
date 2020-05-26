@@ -133,10 +133,15 @@ class Greeter(GreeterBase):
         recursive = request.arg.recursive if request.arg else False
         args = tuple(map(self.map_args_to_local(recursive), args))
         kwargs = pickle.loads(request.arg.kwargs) if request.arg and request.arg.kwargs else {}
-        o = self.object_map[request.object_id]
         result = NodeObject(
             location=self.args.name
         )
+        try:
+            o = self.object_map[request.object_id]
+        except KeyError as e:
+            result.exception = pickle.dumps(e)
+            await stream.send_message(result)
+            return
         if request.attr:
             o = getattr(o, request.attr)
         if callable(o):
@@ -236,6 +241,12 @@ class Greeter(GreeterBase):
             else:
                 return x
         return _r_impl
+
+    async def DelObject(self, stream):
+        request = await stream.recv_message()
+        if request.object_id in self.object_map:
+            del self.object_map[request.object_id]
+        await stream.send_message(ObjectId(id=request.object_id))
 
 
 async def main(args):

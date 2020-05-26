@@ -134,22 +134,28 @@ class IrisObject:
         return pickle.loads(data)
 
     def __call__(self, *args, **kwargs):
-        args = retrieve_args(self, self.node, self.ctx, args)
+        args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.call(
             b_args=pickle.dumps(args) if args else None,
             b_kwargs=pickle.dumps(kwargs) if kwargs else None,
             recursive=False
         )
+        if r.exception():
+            exception = pickle.loads(r.exception())
+            raise exception
         return IrisObject(r, self.node, self.ctx)
     
     def _call_with_attr(self, attr, args, kwargs=None):
-        args = retrieve_args(self, self.node, self.ctx, args)
+        args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.call(
             b_args=pickle.dumps(args) if args else None,
             b_kwargs=pickle.dumps(kwargs) if kwargs else None,
             recursive=False,
             attr=attr,
         )
+        if r.exception():
+            exception = pickle.loads(r.exception())
+            raise exception
         return IrisObject(r, self.node, self.ctx)
     
     def keys(self):
@@ -157,6 +163,9 @@ class IrisObject:
 
     def __getattr__(self, attr):
         r = self.inner.get_attr(attr)
+        if r.exception():
+            exception = pickle.loads(r.exception())
+            raise exception
         return IrisObject(r, self.node, self.ctx)
 
     def __add__(self, other):
@@ -199,11 +208,6 @@ class IrisObject:
     def __index__(self):
         return self._call_with_attr('__index__', args=None).get()
 
-    # TODO: Clean up memory in server
-    def __del__(self):
-        pass
-        # print("IrisObject deleted")
-
 class IrisModel:
     def __init__(self, model, ctx, optimizer):
         super().__init__()
@@ -214,7 +218,7 @@ class IrisModel:
     
     def forward(self, *args, **kwargs):
         if self.train:
-            args = retrieve_args(self, self.optimizer.node, self.ctx, args)
+            args, holds_ref = retrieve_args(self, self.optimizer.node, self.ctx, args)
             r_a = self.ctx.client_wrapper[self.optimizer.node].inner.torch_call(
                 target_node=self.model.node,
                 object_id=self.model.id.id,
@@ -238,7 +242,7 @@ class IrisClientWrapper:
         self.ctx = ctx
     
     def create_object(self, module, recursive, *args, **kwargs):
-        args = retrieve_args(self, self.node, self.ctx, args)
+        args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.create_object(
             module = module.__module__,
             qualname = module.__qualname__,
@@ -246,6 +250,9 @@ class IrisClientWrapper:
             b_kwargs = pickle.dumps(kwargs) if kwargs else None,
             recursive = recursive,
         )
+        if r.exception():
+            exception = pickle.loads(r.exception())
+            raise exception
         return IrisObject(r, self.node, self.ctx)
     
     def torch_call(self):
@@ -256,19 +263,23 @@ class IrisClientWrapper:
         return IrisObject(r, self.node, self.ctx)
     
     def apply(self, func, args, kwargs, recursive):
-        args = retrieve_args(self, self.node, self.ctx, args)
+        args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.apply(
             func=dill.dumps(func),
             b_args=pickle.dumps(args) if args else None,
             b_kwargs=pickle.dumps(kwargs) if kwargs else None,
             recursive=recursive
         )
+        if r.exception():
+            exception = pickle.loads(r.exception())
+            raise exception
         return IrisObject(r, self.node, self.ctx)
     
 def retrieve_args(self, node, ctx, args, recursive=False, cls=tuple):
     if args is None:
-        return None
+        return None, None
     a = []
+    holds_ref = []
     for arg in args:
         if type(arg) is IrisObject and arg.node != node:
             r_a = ctx.client_wrapper[node].inner.torch_call(
@@ -277,15 +288,20 @@ def retrieve_args(self, node, ctx, args, recursive=False, cls=tuple):
                 torch_func="torch_GetObject",
                 to_here=True
             )
+            holds_ref.append(r_a)
             a.append(ObjectId(r_a.id()))
         elif type(arg) is IrisObject:
             a.append(arg.id)
         elif recursive and type(arg) is list:
-            a.append(retrieve_args(self, node, ctx, a, recursive, list))
+            rr = retrieve_args(self, node, ctx, a, recursive, list)
+            holds_ref.extend(rr[1])
+            a.append(rr[0])
         elif recursive and type(arg) is dict:
             raise NotImplementedError()
         elif recursive and type(arg) is tuple:
-            a.append(retrieve_args(self, node, ctx, recursive, a))
+            rr = retrieve_args(self, node, ctx, recursive, a)
+            holds_ref.extend(rr[1])
+            a.append(rr[0])
         else:
             a.append(arg)
-    return cls(a)
+    return cls(a), holds_ref

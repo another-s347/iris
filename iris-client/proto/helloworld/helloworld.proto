@@ -18,6 +18,7 @@ service Greeter {
   rpc GetAttr(GetAttrRequest) returns (NodeObject) {}
   rpc GetParameter(GetParameterRequest) returns (NodeObject) {}
   rpc GetValue(GetParameterRequest) returns (Value) {}
+  rpc DelObject(GetParameterRequest) returns (ObjectId) {}
 }
 
 // The request message containing the user's name.

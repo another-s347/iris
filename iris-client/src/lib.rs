@@ -18,6 +18,7 @@ use tokio::net::UnixStream;
 use tower::service_fn;
 use tonic::transport::{Endpoint, Uri};
 use std::convert::TryFrom;
+use std::sync::Arc;
 
 type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
 type tonicResponseResult<T> = Result<tonic::Response<T>, tonic::Status>;
@@ -44,16 +45,47 @@ struct IrisClientInternal {
 
 #[pyclass(module = "word_count")]
 struct IrisObjectInternal {
+    pub inner: Arc<GuardedIrisObject>
+}
+
+struct GuardedIrisObject {
     pub runtime_handle: tokio::runtime::Handle,
     pub client: RpcClient,
-    pub node_ref: Result<NodeObject, tonic::Status>
+    pub node_ref: NodeObject
+}
+
+impl GuardedIrisObject {
+    fn id(self: &Arc<Self>) -> u64 {
+        self.as_ref().node_ref.id
+    }
+
+    fn exception<'p>(self: &'p Arc<Self>) -> &'p [u8] {
+        self.node_ref.exception.as_ref()
+    }
+
+    fn _del(&mut self, request:GetParameterRequest) {
+        let mut client = self.client.clone();
+        self.runtime_handle.spawn(async move {
+            client.del_object(tonic::Request::new(request)).await.unwrap();
+        });
+    }
+}
+
+impl Drop for GuardedIrisObject {
+    fn drop(&mut self) {
+        let request = GetParameterRequest {
+            object_id: self.node_ref.id
+        };
+        // println!("drop object {}, type {}", self.node_ref.id, self.node_ref.r#type);
+        self._del(request)
+    }
 }
 
 #[pymethods]
 impl IrisObjectInternal {
     fn get_value<'p>(&mut self, py:Python<'p>) -> Option<&'p PyBytes> {
         let request = GetParameterRequest {
-            object_id: self.node_ref.as_ref().unwrap().id
+            object_id: self.inner.id()
         };
         let data = py.allow_threads(||{
             self._get_value(request)
@@ -71,7 +103,7 @@ impl IrisObjectInternal {
     fn get_attr(&mut self, py:Python<'_>, attr: String) -> Option<IrisObjectInternal> {
         let request = GetAttrRequest {
             attr,
-            object_id: self.node_ref.as_ref().unwrap().id
+            object_id: self.inner.id()
         };
         Some(py.allow_threads(|| {
             self._get_attr(request)
@@ -79,41 +111,63 @@ impl IrisObjectInternal {
     }
 
     fn id(&self) -> u64 {
-        self.node_ref.as_ref().unwrap().id
+        self.inner.id()
+    }
+
+    fn exception<'p>(&self, py:Python<'p>) -> Option<&'p PyBytes> {
+        let bytes = self.inner.exception();
+        if bytes.len() == 0 {
+            return None;
+        }
+        else {
+            Some(PyBytes::new(py,self.inner.exception()))
+        }
     }
 }
 
 impl IrisObjectInternal {
+    fn _del(&mut self, request: GetParameterRequest) {
+        let mut client = self.inner.client.clone();
+        self.inner.runtime_handle.spawn(async move {
+            client.del_object(tonic::Request::new(request)).await.unwrap();
+        });
+    }
+
     fn _get_value(&mut self, request: GetParameterRequest) -> Option<Vec<u8>> {
-        let task_handle = self.runtime_handle.block_on(
-            self.client.get_value(tonic::Request::new(request)));
+        let task_handle = self.inner.runtime_handle.block_on(
+            self.inner.client.clone().get_value(tonic::Request::new(request)));
         let ret = task_handle.map(|x|x.into_inner()).unwrap();
         Some(ret.data)
     }
 
     fn _call(&mut self, arg: Option<CallArgs>, attr: Option<String>) -> Option<IrisObjectInternal> {
-        let node_ref = self.node_ref.as_ref().unwrap();
-        let task_handle = self.runtime_handle.block_on(self.client.call(tonic::Request::new(CallRequest {
-            object_id: node_ref.id,
+        let mut client = self.inner.client.clone();
+        let task_handle = self.inner.runtime_handle.block_on(client.call(tonic::Request::new(CallRequest {
+            object_id: self.id(),
             arg,
             attr: attr.unwrap_or_default()
         })));
         Some(IrisObjectInternal {
-            runtime_handle: self.runtime_handle.clone(),
-            client: self.client.clone(),
-            node_ref: task_handle.map(|x|x.into_inner())
+            inner: Arc::new(GuardedIrisObject {
+                runtime_handle: self.inner.runtime_handle.clone(),
+                client,
+                node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+            })
         })
     }
 
     fn _get_attr(&mut self, request:GetAttrRequest) -> IrisObjectInternal {
-        let task_handle = self.runtime_handle.block_on(
-            self.client.get_attr(tonic::Request::new(request)));
+        let mut client = self.inner.client.clone();
+        let task_handle = self.inner.runtime_handle.block_on(
+            client.get_attr(tonic::Request::new(request)));
 
-        IrisObjectInternal {
-            runtime_handle: self.runtime_handle.clone(),
-            client: self.client.clone(),
-            node_ref: task_handle.map(|x|x.into_inner())
-        }
+            IrisObjectInternal {
+                inner: Arc::new(GuardedIrisObject {
+                    runtime_handle: self.inner.runtime_handle.clone(),
+                    client,
+                    node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+                })
+            }
     }
 }
 
@@ -122,11 +176,13 @@ impl IrisClientInternal {
         let task_handle = self.runtime_handle.block_on(
             self.client.create_object(tonic::Request::new(request)));
 
-        IrisObjectInternal {
-            runtime_handle: self.runtime_handle.clone(),
-            client: self.client.clone(),
-            node_ref: task_handle.map(|x|x.into_inner())
-        }
+            IrisObjectInternal {
+                inner: Arc::new(GuardedIrisObject {
+                    runtime_handle: self.runtime_handle.clone(),
+                    client:self.client.clone(),
+                    node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+                })
+            }
     }
 
     fn _init(&mut self, request: InitRequest) {
@@ -141,9 +197,11 @@ impl IrisClientInternal {
         );
 
         IrisObjectInternal {
-            runtime_handle: self.runtime_handle.clone(),
-            client: self.client.clone(),
-            node_ref: task_handle.map(|x|x.into_inner())
+            inner: Arc::new(GuardedIrisObject {
+                runtime_handle: self.runtime_handle.clone(),
+                client:self.client.clone(),
+                node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+            })
         }
     }
 
@@ -153,9 +211,11 @@ impl IrisClientInternal {
         );
 
         IrisObjectInternal {
-            runtime_handle: self.runtime_handle.clone(),
-            client: self.client.clone(),
-            node_ref: task_handle.map(|x|x.into_inner())
+            inner: Arc::new(GuardedIrisObject {
+                runtime_handle: self.runtime_handle.clone(),
+                client:self.client.clone(),
+                node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+            })
         }
     }
 
@@ -165,9 +225,11 @@ impl IrisClientInternal {
         );
 
         IrisObjectInternal {
-            runtime_handle: self.runtime_handle.clone(),
-            client: self.client.clone(),
-            node_ref: task_handle.map(|x|x.into_inner())
+            inner: Arc::new(GuardedIrisObject {
+                runtime_handle: self.runtime_handle.clone(),
+                client:self.client.clone(),
+                node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+            })
         }
     }
 }
