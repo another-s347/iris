@@ -22,6 +22,8 @@ use std::convert::TryFrom;
 use std::sync::Arc;
 use futures::future::join_all;
 use uuid;
+use std::time::{Duration, Instant};
+use pyo3::types::{PyDict, PyTuple};
 
 type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
 type tonicResponseResult<T> = Result<tonic::Response<T>, tonic::Status>;
@@ -60,6 +62,7 @@ struct AsyncTaskKey
     uuid: uuid::Uuid
 }
 #[pyclass(module = "word_count")]
+#[derive(Clone)]
 struct IrisObjectInternal {
     pub inner: Arc<GuardedIrisObject>
 }
@@ -67,12 +70,17 @@ struct IrisObjectInternal {
 struct GuardedIrisObject {
     pub runtime_handle: tokio::runtime::Handle,
     pub client: RpcClient,
-    pub node_ref: NodeObject
+    pub node_ref: NodeObject,
+    pub time_cost: Duration
 }
 
 impl GuardedIrisObject {
     fn id(self: &Arc<Self>) -> u64 {
         self.as_ref().node_ref.id
+    }
+
+    fn time_cost_as_sec(self: &Arc<Self>) -> f64 {
+        self.as_ref().time_cost.as_secs_f64()
     }
 
     fn exception<'p>(self: &'p Arc<Self>) -> &'p [u8] {
@@ -139,6 +147,10 @@ impl IrisObjectInternal {
             Some(PyBytes::new(py,self.inner.exception()))
         }
     }
+
+    fn time_cost_as_sec(&self) -> f64 {
+        self.inner.time_cost_as_sec()
+    }
 }
 
 impl IrisObjectInternal {
@@ -157,6 +169,7 @@ impl IrisObjectInternal {
     }
 
     fn _call(&mut self, arg: Option<CallArgs>, attr: Option<String>) -> Option<IrisObjectInternal> {
+        let start = Instant::now();
         let mut client = self.inner.client.clone();
         let task_handle = self.inner.runtime_handle.block_on(client.call(tonic::Request::new(CallRequest {
             object_id: self.id(),
@@ -167,12 +180,14 @@ impl IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.inner.runtime_handle.clone(),
                 client,
-                node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+                node_ref:task_handle.map(|x|x.into_inner()).unwrap(),
+                time_cost: Instant::now() - start
             })
         })
     }
 
     fn _get_attr(&mut self, request:GetAttrRequest) -> IrisObjectInternal {
+        let start = Instant::now();
         let mut client = self.inner.client.clone();
         let task_handle = self.inner.runtime_handle.block_on(
             client.get_attr(tonic::Request::new(request)));
@@ -181,7 +196,8 @@ impl IrisObjectInternal {
                 inner: Arc::new(GuardedIrisObject {
                     runtime_handle: self.inner.runtime_handle.clone(),
                     client,
-                    node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+                    node_ref:task_handle.map(|x|x.into_inner()).unwrap(),
+                    time_cost: Instant::now() - start
                 })
             }
     }
@@ -189,6 +205,7 @@ impl IrisObjectInternal {
 
 impl IrisClientInternal {
     fn _create_object(&mut self, request: CreateRequest) -> IrisObjectInternal {
+        let start = Instant::now();
         let task_handle = self.runtime_handle.block_on(
             self.client.create_object(tonic::Request::new(request)));
 
@@ -196,7 +213,8 @@ impl IrisClientInternal {
                 inner: Arc::new(GuardedIrisObject {
                     runtime_handle: self.runtime_handle.clone(),
                     client:self.client.clone(),
-                    node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+                    node_ref:task_handle.map(|x|x.into_inner()).unwrap(),
+                    time_cost: Instant::now() - start
                 })
             }
     }
@@ -208,6 +226,7 @@ impl IrisClientInternal {
     }
 
     fn _torch_call(&mut self, request: TorchRpcCallRequest) -> IrisObjectInternal {
+        let start = Instant::now();
         let task_handle = self.runtime_handle.block_on(
             self.client.torch_call(tonic::Request::new(request))
         );
@@ -216,7 +235,8 @@ impl IrisClientInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),
                 client:self.client.clone(),
-                node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+                node_ref:task_handle.map(|x|x.into_inner()).unwrap(),
+                time_cost: Instant::now() - start
             })
         }
     }
@@ -225,12 +245,14 @@ impl IrisClientInternal {
         let mut client = self.client.clone();
         let runtime_handle = self.runtime_handle.clone();
         let task_handle = self.runtime_handle.spawn(async move {
+            let start = Instant::now();
             let result = client.torch_call(tonic::Request::new(request)).await;
             IrisObjectInternal {
                 inner: Arc::new(GuardedIrisObject {
                     client,
                     runtime_handle,
-                    node_ref:result.map(|x|x.into_inner()).unwrap()
+                    node_ref:result.map(|x|x.into_inner()).unwrap(),
+                    time_cost: Instant::now() - start
                 })
             }
         });
@@ -238,6 +260,7 @@ impl IrisClientInternal {
     }
 
     fn _get_parameter(&mut self, request: GetParameterRequest) -> IrisObjectInternal {
+        let start = Instant::now();
         let task_handle = self.runtime_handle.block_on(
             self.client.get_parameter(tonic::Request::new(request))
         );
@@ -246,12 +269,14 @@ impl IrisClientInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),
                 client:self.client.clone(),
-                node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+                node_ref:task_handle.map(|x|x.into_inner()).unwrap(),
+                time_cost: Instant::now() - start
             })
         }
     }
 
     fn _get_parameter_async(&mut self, request: GetParameterRequest) -> JoinHandle<IrisObjectInternal> {
+        let start = Instant::now();
         let mut client = self.client.clone();
         let runtime_handle = self.runtime_handle.clone();
         let task_handle = self.runtime_handle.spawn(async move {
@@ -260,7 +285,8 @@ impl IrisClientInternal {
                 inner: Arc::new(GuardedIrisObject {
                     client,
                     runtime_handle,
-                    node_ref:result.map(|x|x.into_inner()).unwrap()
+                    node_ref:result.map(|x|x.into_inner()).unwrap(),
+                    time_cost: Instant::now() - start
                 })
             }
         });
@@ -268,6 +294,7 @@ impl IrisClientInternal {
     }
 
     fn _apply(&mut self, request: ApplyRequest) -> IrisObjectInternal {
+        let start = Instant::now();
         let task_handle = self.runtime_handle.block_on(
             self.client.apply(tonic::Request::new(request))
         );
@@ -276,7 +303,8 @@ impl IrisClientInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),
                 client:self.client.clone(),
-                node_ref:task_handle.map(|x|x.into_inner()).unwrap()
+                node_ref:task_handle.map(|x|x.into_inner()).unwrap(),
+                time_cost: Instant::now() - start
             })
         }
     }
@@ -284,6 +312,21 @@ impl IrisClientInternal {
 
 #[pymethods]
 impl IrisClientInternal {
+    fn add_set_result(&mut self, py:Python<'_>,async_task: AsyncTaskKey, callback:&PyAny) {
+        let object:PyObject = callback.into();
+        if let Some(task) = self.async_tasks.remove(&async_task.uuid) {
+            let t = task.inner.then(|x| async move {
+                let result = x.unwrap();
+                let gil = Python::acquire_gil();
+                let py = gil.python();
+                let pycell = PyCell::new(py, result).unwrap();
+                let args = PyTuple::new(py, &[pycell]);
+                object.call1(py, args).unwrap();
+            });
+            self.runtime_handle.spawn(t);
+        }
+    }
+
     fn batch_wait<'p>(&mut self, py:Python<'p>, tasks: Vec<AsyncTaskKey>) -> Vec<IrisObjectInternal> {
         let mut t = vec![];
         for key in tasks {
@@ -484,6 +527,7 @@ fn word_count(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<IrisContextInternal>()?;
     m.add_class::<IrisClientInternal>()?;
     m.add_class::<IrisObjectInternal>()?;
+    // m.add_class::<AsyncTest>()?;
 
     Ok(())
 }

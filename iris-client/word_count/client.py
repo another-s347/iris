@@ -7,6 +7,7 @@ import torch.distributed.autograd as dist_autograd
 from torch import optim
 from torch.distributed.optim import DistributedOptimizer
 from proto.helloworld.helloworld_pb2 import *
+import asyncio
 
 class ObjectId:
     def __init__(self, id):
@@ -57,7 +58,7 @@ class IrisOptimizer:
         self.context_id = context_id
         
         self.model_parameters = [self.get_parameter(m) for m in self.models]
-        self.model_parameters = self.ctx.client_wrapper[node].inner.batch_wait(self.model_parameters)
+        self.model_parameters = self.ctx.client_wrapper[node].batch_wait(self.model_parameters)
         self.model_parameters_id = [ObjectId(m.id()) for m in self.model_parameters]
 
         parameters = self.ctx.client_wrapper[node].apply(
@@ -66,13 +67,14 @@ class IrisOptimizer:
             kwargs=None,
             recursive=True
         )
-        b = optim.SGD
+        # b = optim.SGD
+        b = optim.Adadelta
         self.optimizer = self.ctx.client_wrapper[node].create_object(
             DistributedOptimizer,
             False,
             ModuleRef(module=b.__module__,qualname=b.__qualname__), 
             parameters,
-            lr = 0.1
+            lr = 1.0
         )
 
     def get_loss(self, loss):
@@ -84,7 +86,7 @@ class IrisOptimizer:
             torch_func="torch_GetObject",
             to_here=True
         )
-        return IrisObject(r_a, self.node, self.ctx)
+        return IrisObject(r_a, self.node, self.ctx, None, None)
     
     def backward(self, loss):
         if type(loss) is list:
@@ -119,12 +121,14 @@ class IrisOptimizer:
             )
 
 class IrisObject:
-    def __init__(self, inner, node, ctx):
+    def __init__(self, inner, node, ctx, args, kwargs):
         super().__init__()
         self.inner = inner
         self.node = node
         self.ctx = ctx
         self.id = ObjectId(inner.id())
+        self.args = args
+        self.kwargs = kwargs
 
     """
     Get a copy of object in remote node
@@ -134,21 +138,21 @@ class IrisObject:
         return pickle.loads(data)
 
     def __call__(self, *args, **kwargs):
-        args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
+        r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.call(
-            b_args=pickle.dumps(args) if args else None,
+            b_args=pickle.dumps(r_args) if r_args else None,
             b_kwargs=pickle.dumps(kwargs) if kwargs else None,
             recursive=False
         )
         if r.exception():
             exception = pickle.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx)
+        return IrisObject(r, self.node, self.ctx, args, kwargs)
     
     def _call_with_attr(self, attr, args, kwargs=None):
-        args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
+        r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.call(
-            b_args=pickle.dumps(args) if args else None,
+            b_args=pickle.dumps(r_args) if r_args else None,
             b_kwargs=pickle.dumps(kwargs) if kwargs else None,
             recursive=False,
             attr=attr,
@@ -156,7 +160,7 @@ class IrisObject:
         if r.exception():
             exception = pickle.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx)
+        return IrisObject(r, self.node, self.ctx, args, kwargs)
     
     def keys(self):
         return self._call_with_attr('keys', args=None)
@@ -166,7 +170,7 @@ class IrisObject:
         if r.exception():
             exception = pickle.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx)
+        return IrisObject(r, self.node, self.ctx, None, None)
 
     def __add__(self, other):
         return self._call_with_attr('__add__', args=(other,))
@@ -218,21 +222,40 @@ class IrisModel:
     
     def forward(self, *args, **kwargs):
         if self.train:
-            args, holds_ref = retrieve_args(self, self.optimizer.node, self.ctx, args)
+            r_args, holds_ref = retrieve_args(self, self.optimizer.node, self.ctx, args)
             r_a = self.ctx.client_wrapper[self.optimizer.node].inner.torch_call(
                 target_node=self.model.node,
                 object_id=self.model.id.id,
                 to_here=True,
-                b_args=pickle.dumps(args) if args else None,
+                b_args=pickle.dumps(r_args) if r_args else None,
                 b_kwargs=pickle.dumps(kwargs) if kwargs else None
             )
-            return IrisObject(r_a, self.optimizer.node, self.ctx)
+            return IrisObject(r_a, self.optimizer.node, self.ctx, args, kwargs)
         else:
             return self.model.forward(*args, **kwargs)
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
+class IrisAsyncTask:
+    def __init__(self, inner, client):
+        super().__init__()
+        self.loop = asyncio.get_running_loop()
+        self.inner = inner
+        self.client = client
+    
+    def to_fut(self):
+        fut = self.loop.create_future()
+        loop = self.loop
+
+        def resolve_future(result):
+            async def resolve(r):
+                fut.set_result(r)
+            asyncio.run_coroutine_threadsafe(resolve(result), loop)
+
+        self.client.add_set_result(self.inner, resolve_future)
+        # self.client.add_set_exception(inner, fut.set_exception)
+        return fut
 
 class IrisClientWrapper:
     def __init__(self, inner, node, ctx):
@@ -241,42 +264,46 @@ class IrisClientWrapper:
         self.node = node
         self.ctx = ctx
     
+    def batch_wait(self, tasks):
+        return self.inner.batch_wait([m.inner for m in tasks])
+    
     def create_object(self, module, recursive, *args, **kwargs):
-        args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
+        r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.create_object(
             module = module.__module__,
             qualname = module.__qualname__,
-            b_args = pickle.dumps(args) if args else None,
+            b_args = pickle.dumps(r_args) if r_args else None,
             b_kwargs = pickle.dumps(kwargs) if kwargs else None,
             recursive = recursive,
         )
         if r.exception():
             exception = pickle.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx)
+        # print("time cost", r.time_cost_as_sec())
+        return IrisObject(r, self.node, self.ctx, args, kwargs)
     
     def torch_call(self):
         pass
 
     def get_parameter(self, object_id):
         r = self.inner.get_parameter(object_id.id)
-        return IrisObject(r, self.node, self.ctx)
+        return IrisObject(r, self.node, self.ctx, None, None)
 
     def get_parameter_async(self, object_id):
-        return self.inner.get_parameter_async(object_id.id)
+        return IrisAsyncTask(self.inner.get_parameter_async(object_id.id), self.inner)
 
     def apply(self, func, args, kwargs, recursive):
-        args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
+        r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.apply(
             func=dill.dumps(func),
-            b_args=pickle.dumps(args) if args else None,
+            b_args=pickle.dumps(r_args) if r_args else None,
             b_kwargs=pickle.dumps(kwargs) if kwargs else None,
             recursive=recursive
         )
         if r.exception():
             exception = pickle.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx)
+        return IrisObject(r, self.node, self.ctx, args, kwargs)
     
 def retrieve_args(self, node, ctx, args, recursive=False, cls=tuple):
     if args is None:

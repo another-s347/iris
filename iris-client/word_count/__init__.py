@@ -10,7 +10,8 @@ __all__ = [
     "IrisContext",
     "IrisGradContext",
     "IrisOptimizer",
-    "IrisModel"
+    "IrisModel",
+    "AsyncTest"
     ]
 
 
