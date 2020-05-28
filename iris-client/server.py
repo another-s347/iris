@@ -16,6 +16,8 @@ import argparse
 # import common
 import functools
 import sys
+import uuid
+import time
 
 parser = argparse.ArgumentParser(description='iris backend client.')
 parser.add_argument('-r', '--rank', default=0, type=int, help='rank')
@@ -38,9 +40,6 @@ def torch_CallWithObject(object_id, attr, *args, **kwargs):
     if attr:
         o = getattr(o, attr)
     result = o(*args, **kwargs)
-    for p in o.parameters():
-        print(p, p.grad)
-    print("-----")
     return result
 
 
@@ -59,7 +58,7 @@ class Greeter(GreeterBase):
         self.modules = {}
         self.object_map[id(self.modules)] = self.modules
         self.is_master = args.rank == 0
-        self.model = None
+        self.loop = asyncio.get_running_loop()
         if service:
             raise NotImplementedError()
         service = self
@@ -83,9 +82,10 @@ class Greeter(GreeterBase):
         request: GetParameterRequest = await stream.recv_message()
         model = self.object_map[request.object_id]
         parameters = [rpc.RRef(p) for p in model.parameters()]
-        self.object_map[id(parameters)] = parameters
+        key = hash(uuid.uuid4().int)
+        self.object_map[key] = parameters
         result = NodeObject(location=self.args.name,type=str(type(parameters)))
-        result.id = id(parameters)
+        result.id = key
         await stream.send_message(result)
 
     async def Apply(self, stream):
@@ -96,12 +96,12 @@ class Greeter(GreeterBase):
         targs = tuple(map(self.map_args_to_local(False), args))
         func = dill.loads(request.func)
         ret = func(*targs)
-        print(ret)
         result = NodeObject(
             location=self.args.name,type=str(type(ret))
         )
-        result.id = id(ret)
-        self.object_map[id(ret)] = ret
+        key = hash(uuid.uuid4().int)
+        result.id = key
+        self.object_map[key] = ret
         await stream.send_message(result)
 
     async def TorchCall(self, stream):
@@ -114,20 +114,20 @@ class Greeter(GreeterBase):
         ret = rpc.remote(request.target_node, handler, args=(
             request.object_id, request.attr, *args))
         if request.to_here:
+            # a = time.time()
             ret = ret.to_here()
-        self.object_map[id(ret)] = ret
+            # print(time.time()-a)
+            # ret = await self.loop.run_in_executor(None, ret.to_here)
+        key = hash(uuid.uuid4().int)
+        self.object_map[key] = ret
         result = NodeObject(
             location=self.args.name,type=str(type(ret))
         )
-        result.id = id(ret)
+        result.id = key
         await stream.send_message(result)
 
     async def Call(self, stream):
         request: CallRequest = await stream.recv_message()
-        if self.model:
-            for p in self.model.parameters():
-                print(p, p.grad)
-            print("----")
         args = pickle.loads(
             request.arg.args) if request.arg and request.arg.args else ()
         recursive = request.arg.recursive if request.arg else False
@@ -146,20 +146,22 @@ class Greeter(GreeterBase):
             o = getattr(o, request.attr)
         if callable(o):
             try:
-                ret = o(*args, **kwargs)
-                result.id = id(ret)
+                if isinstance(o, torch.nn.Module):
+                    def run():
+                        return o(*args, **kwargs)
+                    ret = await self.loop.run_in_executor(None, run)
+                else:
+                    ret = o(*args, **kwargs)
+                key = hash(uuid.uuid4().int)
+                result.id = key
                 result.type = str(type(ret))
-                self.object_map[id(ret)] = ret
+                self.object_map[key] = ret
             except Exception as e:
                 print(e)
                 print(args)
                 result.exception = pickle.dumps(e)
         else:
-            if type(o) is torch.Tensor:
-                result.id = id(o)
-                result.type = str(type(str))
-            else:
-                result.exception = pickle.dumps(
+            result.exception = pickle.dumps(
                     TypeError(f"{type(o)} is not callable."))
         await stream.send_message(result)
 
@@ -179,11 +181,10 @@ class Greeter(GreeterBase):
             kwargs = pickle.loads(
                 request.arg.kwargs) if request.arg and request.arg.kwargs else {}
             obj = m(*args, **kwargs)
-            if type(obj) is torch.nn.modules.linear.Linear:
-                self.model = obj
-            self.object_map[id(obj)] = obj
+            key = hash(uuid.uuid4().int)
+            self.object_map[key] = obj
             await stream.send_message(NodeObject(
-                id=id(obj),
+                id=key,
                 location=self.args.name,
                 type=str(type(obj))
             ))
@@ -200,8 +201,9 @@ class Greeter(GreeterBase):
         result = NodeObject(
             location=self.args.name,type=str(type(a))
         )
-        result.id = id(a)
-        self.object_map[id(a)] = a
+        key = hash(uuid.uuid4().int)
+        result.id = key
+        self.object_map[key] = a
         await stream.send_message(result)
 
     async def SayHello(self, stream):
