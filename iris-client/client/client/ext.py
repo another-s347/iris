@@ -1,5 +1,5 @@
 from .client import IrisContextInternal, IrisObjectId
-import pickle
+import dill
 import sys
 import dill
 import functools
@@ -25,10 +25,10 @@ class IrisContext:
     
     def setup(self):
         self.client_wrapper["node0"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node0-0.sock"), "node0", self)
-        # self.client_wrapper["node1"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node1-1.sock"), "node1", self)
+        self.client_wrapper["node1"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node1-1.sock"), "node1", self)
         # self.client_wrapper["node2"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node2-2.sock"), "node2", self)
         self.client_wrapper["node0"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=0)
-        # self.client_wrapper["node1"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=1)
+        self.client_wrapper["node1"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=1)
         # self.client_wrapper["node2"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=2)
 
     def create_object(self, node, module, recursive, *args, **kwargs):
@@ -100,7 +100,7 @@ class IrisOptimizer:
         self.ctx.client_wrapper[self.node].inner.create_object(
             module = module.__module__,
             qualname = module.__name__,
-            b_args = pickle.dumps(args) if args else None,
+            b_args = dill.dumps(args) if args else None,
             b_kwargs = None,
             recursive = True,
         )
@@ -135,30 +135,30 @@ class IrisObject:
     """
     def get(self):
         data = self.inner.get_value()
-        return pickle.loads(data)
+        return dill.loads(data)
 
     def __call__(self, *args, **kwargs):
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.call(
-            b_args=pickle.dumps(r_args) if r_args else None,
-            b_kwargs=pickle.dumps(kwargs) if kwargs else None,
+            b_args=dill.dumps(r_args) if r_args else None,
+            b_kwargs=dill.dumps(kwargs) if kwargs else None,
             recursive=False
         )
         if r.exception():
-            exception = pickle.loads(r.exception())
+            exception = dill.loads(r.exception())
             raise exception
         return IrisObject(r, self.node, self.ctx, args, kwargs)
     
     def _call_with_attr(self, attr, args, kwargs=None):
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.call(
-            b_args=pickle.dumps(r_args) if r_args else None,
-            b_kwargs=pickle.dumps(kwargs) if kwargs else None,
+            b_args=dill.dumps(r_args) if r_args else None,
+            b_kwargs=dill.dumps(kwargs) if kwargs else None,
             recursive=False,
             attr=attr,
         )
         if r.exception():
-            exception = pickle.loads(r.exception())
+            exception = dill.loads(r.exception())
             raise exception
         return IrisObject(r, self.node, self.ctx, args, kwargs)
     
@@ -168,7 +168,7 @@ class IrisObject:
     def __getattr__(self, attr):
         r = self.inner.get_attr(attr)
         if r.exception():
-            exception = pickle.loads(r.exception())
+            exception = dill.loads(r.exception())
             raise exception
         return IrisObject(r, self.node, self.ctx, None, None)
 
@@ -227,8 +227,8 @@ class IrisModel:
                 target_node=self.model.node,
                 object_id=self.model.id.id,
                 to_here=True,
-                b_args=pickle.dumps(r_args) if r_args else None,
-                b_kwargs=pickle.dumps(kwargs) if kwargs else None
+                b_args=dill.dumps(r_args) if r_args else None,
+                b_kwargs=dill.dumps(kwargs) if kwargs else None
             )
             return IrisObject(r_a, self.optimizer.node, self.ctx, args, kwargs)
         else:
@@ -272,12 +272,12 @@ class IrisClientWrapper:
         r = self.inner.create_object(
             module = module.__module__,
             qualname = module.__qualname__,
-            b_args = pickle.dumps(r_args) if r_args else None,
-            b_kwargs = pickle.dumps(kwargs) if kwargs else None,
+            b_args = dill.dumps(r_args) if r_args else None,
+            b_kwargs = dill.dumps(kwargs) if kwargs else None,
             recursive = recursive,
         )
         if r.exception():
-            exception = pickle.loads(r.exception())
+            exception = dill.loads(r.exception())
             raise exception
         # print("time cost", r.time_cost_as_sec())
         return IrisObject(r, self.node, self.ctx, args, kwargs)
@@ -296,12 +296,12 @@ class IrisClientWrapper:
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.apply(
             func=dill.dumps(func),
-            b_args=pickle.dumps(r_args) if r_args else None,
-            b_kwargs=pickle.dumps(kwargs) if kwargs else None,
+            b_args=dill.dumps(r_args) if r_args else None,
+            b_kwargs=dill.dumps(kwargs) if kwargs else None,
             recursive=recursive
         )
         if r.exception():
-            exception = pickle.loads(r.exception())
+            exception = dill.loads(r.exception())
             raise exception
         return IrisObject(r, self.node, self.ctx, args, kwargs)
     
