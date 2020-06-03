@@ -28,40 +28,38 @@ use pyo3::types::{PyDict, PyTuple};
 type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
 type tonicResponseResult<T> = Result<tonic::Response<T>, tonic::Status>;
 
-pub mod hello_world {
-    tonic::include_proto!("helloworld");
-}
+use common::hello_world;
 
 pub mod context;
 use context::IrisContextInternal;
 
 
 /// Represents a file that can be searched
-#[pyclass(module = "word_count")]
+#[pyclass(module = "client")]
 struct WordCounter {
     path: PathBuf,
 }
 
-#[pyclass(module = "word_count")]
+#[pyclass(module = "client")]
 struct IrisClientInternal {
     pub runtime_handle: tokio::runtime::Handle,
     pub client: RpcClient,
     pub async_tasks: HashMap<uuid::Uuid, AsyncIrisObjectTask>
 }
 
-#[pyclass(module = "word_count")]
+#[pyclass(module = "client")]
 struct AsyncIrisObjectTask  
 {
     pub inner: JoinHandle<IrisObjectInternal>
 }
 
-#[pyclass(module = "word_count")]
+#[pyclass(module = "client")]
 #[derive(Clone)]
 struct AsyncTaskKey
 {
     uuid: uuid::Uuid
 }
-#[pyclass(module = "word_count")]
+#[pyclass(module = "client")]
 #[derive(Clone)]
 struct IrisObjectInternal {
     pub inner: Arc<GuardedIrisObject>
@@ -520,13 +518,14 @@ fn count_line(line: &str, needle: &str) -> usize {
 
 
 #[pymodule]
-fn word_count(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn client(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(count_line))?;
     // m.add_wrapped(wrap_pyfunction!(create_iris_client))?;
     m.add_class::<WordCounter>()?;
     m.add_class::<IrisContextInternal>()?;
     m.add_class::<IrisClientInternal>()?;
     m.add_class::<IrisObjectInternal>()?;
+    m.add_class::<common::IrisObjectId>()?;
     // m.add_class::<AsyncTest>()?;
 
     Ok(())

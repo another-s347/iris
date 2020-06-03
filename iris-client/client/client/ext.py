@@ -1,4 +1,4 @@
-from .word_count import IrisContextInternal
+from .client import IrisContextInternal, IrisObjectId
 import pickle
 import sys
 import dill
@@ -6,16 +6,16 @@ import functools
 import torch.distributed.autograd as dist_autograd
 from torch import optim
 from torch.distributed.optim import DistributedOptimizer
-from proto.helloworld.helloworld_pb2 import *
+# from proto.helloworld.helloworld_pb2 import *
 import asyncio
 
-class ObjectId:
-    def __init__(self, id):
-        super().__init__()
-        self.id = id
+# class ObjectId:
+#     def __init__(self, id):
+#         super().__init__()
+#         self.id = id
     
-    def __int__(self):
-        return self.id
+#     def __int__(self):
+#         return self.id
 
 class IrisContext:
     def __init__(self):
@@ -25,11 +25,11 @@ class IrisContext:
     
     def setup(self):
         self.client_wrapper["node0"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node0-0.sock"), "node0", self)
-        self.client_wrapper["node1"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node1-1.sock"), "node1", self)
-        self.client_wrapper["node2"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node2-2.sock"), "node2", self)
+        # self.client_wrapper["node1"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node1-1.sock"), "node1", self)
+        # self.client_wrapper["node2"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node2-2.sock"), "node2", self)
         self.client_wrapper["node0"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=0)
-        self.client_wrapper["node1"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=1)
-        self.client_wrapper["node2"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=2)
+        # self.client_wrapper["node1"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=1)
+        # self.client_wrapper["node2"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=2)
 
     def create_object(self, node, module, recursive, *args, **kwargs):
         inner_client = self.client_wrapper[node]
@@ -59,7 +59,7 @@ class IrisOptimizer:
         
         self.model_parameters = [self.get_parameter(m) for m in self.models]
         self.model_parameters = self.ctx.client_wrapper[node].batch_wait(self.model_parameters)
-        self.model_parameters_id = [ObjectId(m.id()) for m in self.model_parameters]
+        self.model_parameters_id = [IrisObjectId(m.id()) for m in self.model_parameters]
 
         parameters = self.ctx.client_wrapper[node].apply(
             func=lambda *x: functools.reduce(lambda a,b:a+b,x),
@@ -126,7 +126,7 @@ class IrisObject:
         self.inner = inner
         self.node = node
         self.ctx = ctx
-        self.id = ObjectId(inner.id())
+        self.id = IrisObjectId(inner.id())
         self.args = args
         self.kwargs = kwargs
 
@@ -319,7 +319,7 @@ def retrieve_args(self, node, ctx, args, recursive=False, cls=tuple):
                 to_here=True
             )
             holds_ref.append(r_a)
-            a.append(ObjectId(r_a.id()))
+            a.append(IrisObjectId(r_a.id()))
         elif type(arg) is IrisObject:
             a.append(arg.id)
         elif recursive and type(arg) is list:

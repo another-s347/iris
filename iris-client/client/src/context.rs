@@ -22,6 +22,7 @@ type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
 type tonicResponseResult<T> = Result<tonic::Response<T>, tonic::Status>;
 
 async fn _connect(address: String) -> Result<RpcClient, tonic::transport::Error> {
+    // panic!();
     let channel = Endpoint::try_from(format!("http://[::]:50051{}", address))
         .unwrap()
         .connect_with_connector(service_fn(|uri: Uri| {
@@ -32,7 +33,7 @@ async fn _connect(address: String) -> Result<RpcClient, tonic::transport::Error>
     Ok(client)
 }
 
-#[pyclass(module = "word_count")]
+#[pyclass(module = "client")]
 pub struct IrisContextInternal {
     pub runtime: tokio::runtime::Runtime,
     pub nodes: HashMap<i32, i32>,
