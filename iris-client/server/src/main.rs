@@ -26,13 +26,15 @@ use tokio::net::UnixListener;
 use tokio::task;
 use tonic::{transport::Server, Request, Response, Status};
 use uuid;
+use dashmap::DashMap;
 #[derive(Debug, Clone)]
 struct IrisServer {
-    modules: Arc<Mutex<HashMap<String, Py<PyModule>>>>,
-    objects: Arc<Mutex<HashMap<u64, Py<PyAny>>>>,
+    modules: Arc<DashMap<String, Py<PyModule>>>,
+    objects: Arc<DashMap<u64, Py<PyAny>>>,
     pickle: Py<PyModule>,
     torch_rpc: Py<PyModule>,
     torch_handlers: Arc<HashMap<&'static str, Py<PyAny>>>,
+    profile: Arc<dashmap::DashMap<&'static str, (usize, std::time::Duration)>>
 }
 
 fn dbg_py<T>(py: Python<'_>, x: PyResult<T>) -> PyResult<T> {
@@ -41,11 +43,6 @@ fn dbg_py<T>(py: Python<'_>, x: PyResult<T>) -> PyResult<T> {
         err.print(py);
     }
     x
-}
-
-#[pyfunction]
-fn double(x: usize) -> usize {
-    x * 2
 }
 
 impl IrisServer {
@@ -65,7 +62,7 @@ impl IrisServer {
         let path = sys.get("path")?.cast_as::<PyList>()?;
         println!("{:?}", path.repr());
 
-        let mut state = self.modules.lock().unwrap();
+        let mut state = &self.modules;
         for module_name in modules {
             println!("import.. {}", module_name);
             let py = py.import(module_name.as_str())?;
@@ -158,7 +155,7 @@ fn map_result(pickle: &PyObject, py: Python<'_>, result: PyResult<NodeObject>) -
 }
 
 fn map_kwargs_to_local<'a>(
-    object_map: &HashMap<u64, Py<PyAny>>,
+    object_map: &DashMap<u64, Py<PyAny>>,
     py: Python<'a>,
     args: Option<ProtoPyDict>,
     recursive: &PyObject,
@@ -174,7 +171,7 @@ fn map_kwargs_to_local<'a>(
 }
 
 fn map_args_to_local<'a>(
-    object_map: &HashMap<u64, Py<PyAny>>,
+    object_map: &DashMap<u64, Py<PyAny>>,
     py: Python<'a>,
     args: Option<ProtoPyTuple>,
     recursive: &PyObject,
@@ -190,7 +187,7 @@ fn map_args_to_local<'a>(
 }
 
 fn map_kwargs_to_local_impl<'a>(
-    maps: &HashMap<u64, Py<PyAny>>,
+    maps: &DashMap<u64, Py<PyAny>>,
     py: Python<'a>,
     args: ProtoPyDict,
     recursive: &PyObject,
@@ -244,7 +241,7 @@ fn map_kwargs_to_local_impl<'a>(
 }
 
 fn map_list_to_local_impl<'a>(
-    maps: &HashMap<u64, Py<PyAny>>,
+    maps: &DashMap<u64, Py<PyAny>>,
     py: Python<'a>,
     args: ProtoPyList,
     recursive: &PyObject,
@@ -300,7 +297,7 @@ fn map_list_to_local_impl<'a>(
     PyList::new(py, tuple_args.iter().map(|x| x.as_ref(py))).to_object(py)
 }
 fn map_args_to_local_impl<'a>(
-    maps: &HashMap<u64, Py<PyAny>>,
+    maps: &DashMap<u64, Py<PyAny>>,
     py: Python<'a>,
     args: ProtoPyTuple,
     recursive: &PyObject,
@@ -357,12 +354,12 @@ fn map_args_to_local_impl<'a>(
 }
 
 fn _call(
-    object_map: Arc<Mutex<HashMap<u64, Py<PyAny>>>>,
+    object_map: Arc<DashMap<u64, Py<PyAny>>>,
     py: Python<'_>,
     request: CallRequest,
     pickle: &PyObject,
 ) -> PyResult<NodeObject> {
-    let mut maps = object_map.lock().unwrap();
+    let mut maps = object_map;
     let (args, kwargs) = if let Some(arg) = request.arg {
         (
             map_args_to_local(&maps, py, arg.args, &pickle),
@@ -396,17 +393,17 @@ fn _call(
 }
 
 fn create_object(
-    object_map: Arc<Mutex<HashMap<u64, Py<PyAny>>>>,
-    modules: Arc<Mutex<HashMap<String, Py<PyModule>>>>,
+    object_map: Arc<DashMap<u64, Py<PyAny>>>,
+    modules: Arc<DashMap<String, Py<PyModule>>>,
     py:Python<'_>,
     request: CreateRequest,
     pickle: &PyObject,
 ) -> PyResult<NodeObject> {
-    let module = modules.lock().unwrap();
+    let module = modules;
     if let Some(m) = module.get(&request.module) {
         let m = m.to_object(py);
         let m = m.getattr(py, request.qualname)?;
-        let mut maps = object_map.lock().unwrap();
+        let mut maps = object_map;
         let (args, kwargs) = if let Some(arg) = request.arg {
             let pickle = pickle.to_object(py);
             (
@@ -443,13 +440,13 @@ fn create_object(
 }
 
 fn apply(
-    object_map: Arc<Mutex<HashMap<u64, Py<PyAny>>>>,
-    modules: Arc<Mutex<HashMap<String, Py<PyModule>>>>,
+    object_map: Arc<DashMap<u64, Py<PyAny>>>,
+    modules: Arc<DashMap<String, Py<PyModule>>>,
     py: Python<'_>,
     request: ApplyRequest,
     pickle: &PyObject,
 ) -> PyResult<NodeObject> {
-    let mut maps = object_map.lock().unwrap();
+    let mut maps = object_map;
     let (args, kwargs) = if let Some(arg) = request.arg {
         (
             map_args_to_local(&maps, py, arg.args, &pickle),
@@ -513,6 +510,7 @@ impl Greeter for IrisServer {
     }
 
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<NodeObject>, Status> {
+        let start = std::time::Instant::now();
         let request: CallRequest = request.into_inner();
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
@@ -525,6 +523,11 @@ impl Greeter for IrisServer {
         })
         .await
         .unwrap();
+        let end = std::time::Instant::now();
+        let d:std::time::Duration = end - start;
+        self.profile.update("call", move|key, (count, value)|{
+            (count+1, *value + d)
+        });
         return Ok(Response::new(call_task));
     }
 
@@ -532,6 +535,7 @@ impl Greeter for IrisServer {
         &self,
         request: Request<CreateRequest>,
     ) -> Result<Response<NodeObject>, Status> {
+        let start = std::time::Instant::now();
         let request = request.into_inner();
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
@@ -545,10 +549,16 @@ impl Greeter for IrisServer {
         })
         .await
         .unwrap();
+        let end = std::time::Instant::now();
+        let d:std::time::Duration = end - start;
+        self.profile.update("create", move|key, (count, value)|{
+            (count+1, *value + d)
+        });
         return Ok(Response::new(result));
     }
 
     async fn apply(&self, request: Request<ApplyRequest>) -> Result<Response<NodeObject>, Status> {
+        let start = std::time::Instant::now();
         let request = request.into_inner();
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
@@ -562,6 +572,11 @@ impl Greeter for IrisServer {
         })
         .await
         .unwrap();
+        let end = std::time::Instant::now();
+        let d:std::time::Duration = end - start;
+        self.profile.update("apply", move|key, (count, value)|{
+            (count+1, *value + d)
+        });
         return Ok(Response::new(result));
     }
 
@@ -580,7 +595,7 @@ impl Greeter for IrisServer {
         id.hash(&mut hasher);
         let id = hasher.finish();
 
-        let mut maps = self.objects.lock().unwrap();
+        let mut maps = &self.objects; //.lock().unwrap();
         maps.insert(id, Py::from(obj));
 
         return Ok(Response::new(NodeObject {
@@ -593,6 +608,7 @@ impl Greeter for IrisServer {
         &self,
         request: Request<GetAttrRequest>,
     ) -> Result<Response<NodeObject>, Status> {
+        let start = std::time::Instant::now();
         let request = request.into_inner();
         let gil = Python::acquire_gil();
         let py = gil.python();
@@ -602,13 +618,18 @@ impl Greeter for IrisServer {
         id.hash(&mut hasher);
         let id = hasher.finish();
 
-        let mut maps = self.objects.lock().unwrap();
+        let mut maps = &self.objects; //.lock().unwrap();
         let obj = maps.get(&request.object_id).unwrap();
         let obj = obj.to_object(py);
         let obj = obj.as_ref(py);
         let obj = obj.getattr(request.attr.as_str()).unwrap();
         maps.insert(id, Py::from(obj));
 
+        let end = std::time::Instant::now();
+        let d:std::time::Duration = end - start;
+        self.profile.update("getattr", move|key, (count, value)|{
+            (count+1, *value + d)
+        });
         return Ok(Response::new(NodeObject {
             id,
             ..Default::default()
@@ -623,9 +644,10 @@ impl Greeter for IrisServer {
         let gil = Python::acquire_gil();
         let py = gil.python();
 
-        let mut maps = self.objects.lock().unwrap();
+        let mut maps = &self.objects; //.lock().unwrap();
         let rpc: &PyModule = self.torch_rpc.as_ref(py);
-        let model: PyObject = maps.get(&request.object_id).unwrap().into_py(py);
+        let model:&Py<PyAny> = &maps.get(&request.object_id).unwrap();
+        let model: PyObject = model.into_py(py);
         // let parameters = model.call_method0(py, "parameters").unwrap();
         // let parameters:&pyo3::types::PySequence = parameters.cast_as(py).unwrap();
         // let ret = PyList::empty(py);
@@ -661,11 +683,17 @@ impl Greeter for IrisServer {
         &self,
         request: Request<GetParameterRequest>,
     ) -> Result<Response<ObjectId>, Status> {
+        let start = std::time::Instant::now();
         let request = request.into_inner();
 
-        let mut maps = self.objects.lock().unwrap();
+        let mut maps = &self.objects;//.lock().unwrap();
         maps.remove(&request.object_id);
 
+        let end = std::time::Instant::now();
+        let d:std::time::Duration = end - start;
+        self.profile.update("del", move|key, (count, value)|{
+            (count+1, *value + d)
+        });
         return Ok(Response::new(ObjectId {
             id: request.object_id,
         }));
@@ -679,7 +707,7 @@ impl Greeter for IrisServer {
         let gil = Python::acquire_gil();
         let py = gil.python();
 
-        let maps = self.objects.lock().unwrap();
+        let maps = &self.objects;//.lock().unwrap();
         let obj = maps.get(&request.object_id).unwrap();
 
         let data = self.serialize(py, obj.to_object(py)).unwrap();
@@ -795,22 +823,40 @@ def torch_GetObject(object_id, attr, *args, **kwargs):
 
     let mut uds = UnixListener::bind(&path)?;
 
+    let profile = dashmap::DashMap::new();
+    profile.insert("call", (0, std::time::Duration::default()));
+    profile.insert("apply", (0, std::time::Duration::default()));
+    profile.insert("getattr", (0, std::time::Duration::default()));
+    profile.insert("create", (0, std::time::Duration::default()));
+    profile.insert("del", (0, std::time::Duration::default()));
+    let profile = Arc::new(profile);
+
     let greeter = IrisServer {
-        modules: Arc::new(Mutex::new(HashMap::new())),
-        objects: Arc::new(Mutex::new(HashMap::new())),
+        modules: Arc::new(DashMap::new()),
+        objects: Arc::new(DashMap::new()),
         pickle,
         torch_rpc,
         torch_handlers: Arc::new(torch_handlers),
+        profile: profile.clone()
     };
-
+    let p = profile.clone();
     let (tx, mut rx) = tokio::sync::broadcast::channel(1);
     ctrlc::set_handler(move || {
         tx.send(()).unwrap();
     })
     .expect("Error setting Ctrl-C handler");
 
+    tokio::spawn(async move {
+        let mut t = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            t.tick().await;
+            println!("{:?}", p);
+        }
+    });
+
     Server::builder()
         .add_service(GreeterServer::new(greeter))
+        // .serve_with_shutdown("127.0.0.1:12345".parse().unwrap(), rx.recv().map(|_|()))
         .serve_with_incoming_shutdown(
             uds.incoming().map_ok(unix::UnixStream),
             rx.recv().map(|_| ()),

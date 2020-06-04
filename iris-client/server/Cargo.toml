@@ -19,3 +19,4 @@ uuid = { version="0.8", features = ["v4"] }
 ctrlc = { version = "3.0", features = ["termination"] }
 dict_derive = "0.2.0"
 structopt = "*"
+dashmap = { version="4.0.0-rc5" }
