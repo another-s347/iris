@@ -1,9 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyInt;
-
-pub mod hello_world {
-    tonic::include_proto!("helloworld");
-}
+use pyo3::type_object::PyTypeInfo;
 
 #[pyclass(module="client")]
 #[derive(Clone)]
@@ -37,10 +34,29 @@ impl IrisObjectId {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+impl IrisObjectId {
+    pub unsafe fn unsound_extract(x: &PyAny) -> Option<Self> {
+        if x.get_type().name() != "client.IrisObjectId" {
+            return None;
+        }
+        println!("{}, {}", Self::is_instance(x), x.get_type().name());
+        let cell: &PyCell<IrisObjectId> = unsafe { PyTryFrom::try_from_unchecked(x) };
+        let y = cell.try_borrow().ok()?.clone();
+        std::mem::forget(cell);
+        Some(y)
     }
 }
+
+// #[pymodule]
+// fn client(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+//     // m.add_wrapped(wrap_pyfunction!(count_line))?;
+//     // m.add_wrapped(wrap_pyfunction!(create_iris_client))?;
+//     // m.add_class::<WordCounter>()?;
+//     // m.add_class::<IrisContextInternal>()?;
+//     // m.add_class::<IrisClientInternal>()?;
+//     // m.add_class::<IrisObjectInternal>()?;
+//     m.add_class::<IrisObjectId>()?;
+//     // m.add_class::<AsyncTest>()?;
+
+//     Ok(())
+// }

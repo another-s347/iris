@@ -1,5 +1,5 @@
 [package]
-name = "client"
+name = "proto"
 version = "0.1.0"
 authors = ["skye347 <s347419313@gmail.com>"]
 edition = "2018"
@@ -7,20 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rayon = "1.0.2"
-pyo3 = { version="0.10.1", features = ["extension-module"] }
+# rayon = "1.0.2"
 tokio = { version="0.2", features = ["full"] }
 tonic = "0.2"
 futures = "0.3"
 prost = "0.6"
 tower = "*"
-uuid = { version="0.8", features = ["v4"] }
-common = { path="../common" }
-proto = { path="../proto" }
 
 [build-dependencies]
 tonic-build = "0.2"
-
-[lib]
-name = "client"
-crate-type = ["cdylib"]
