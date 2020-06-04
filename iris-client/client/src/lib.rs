@@ -139,6 +139,34 @@ impl IrisObjectInternal {
         self.inner.id()
     }
 
+    fn get_native_value(&self, py: Python<'_>) -> PyObject {
+        match &self.inner.node_ref.value {
+            Some(ProtoPyAny {
+                data: Some(proto_py_any::Data::Boolean(x)),
+            }) => x.to_object(py),
+            Some(ProtoPyAny {
+                data: Some(proto_py_any::Data::I64(x)),
+            }) => x.to_object(py),
+            Some(ProtoPyAny {
+                data: Some(proto_py_any::Data::F32(x)),
+            }) => x.to_object(py),
+            Some(ProtoPyAny {
+                data: Some(proto_py_any::Data::Str(x)),
+            }) => x.to_object(py),
+            Some(ProtoPyAny {
+                data: Some(proto_py_any::Data::Tuple(tuple)),
+            }) => {
+                tuple_to_obj(py, tuple, self).unwrap()
+            }
+            _ => py.None(),
+            None => py.None(),
+        }
+    }
+
+    fn get_type(&self) -> String {
+        self.inner.node_ref.r#type.to_string()
+    }
+
     fn exception<'p>(&self, py: Python<'p>) -> Option<&'p PyBytes> {
         let bytes = self.inner.exception();
         if bytes.len() == 0 {
@@ -594,9 +622,9 @@ fn tuple_to_proto(arg: &PyTuple, py: Python<'_>, pickle: &PyObject) -> ProtoPyTu
     for a in arg.iter() {
         if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Boolean(x));
-        } else if let Ok(true) = py.is_instance::<pyo3::types::PyFloat,_>(a) {
+        } else if let Ok(true) = py.is_instance::<pyo3::types::PyFloat, _>(a) {
             vec.push(proto_py_any::Data::F32(a.extract().unwrap()));
-        } else if let Ok(true) = py.is_instance::<pyo3::types::PyInt,_>(a) {
+        } else if let Ok(true) = py.is_instance::<pyo3::types::PyInt, _>(a) {
             vec.push(proto_py_any::Data::I64(a.extract().unwrap()));
         } else if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Str(x));
@@ -626,9 +654,9 @@ fn list_to_proto(arg: &PyList, py: Python<'_>, pickle: &PyObject) -> ProtoPyList
     for a in arg.iter() {
         if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Boolean(x));
-        } else if let Ok(true) = py.is_instance::<pyo3::types::PyFloat,_>(a) {
+        } else if let Ok(true) = py.is_instance::<pyo3::types::PyFloat, _>(a) {
             vec.push(proto_py_any::Data::F32(a.extract().unwrap()));
-        } else if let Ok(true) = py.is_instance::<pyo3::types::PyInt,_>(a) {
+        } else if let Ok(true) = py.is_instance::<pyo3::types::PyInt, _>(a) {
             vec.push(proto_py_any::Data::I64(a.extract().unwrap()));
         } else if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Str(x));
@@ -664,7 +692,7 @@ fn dict_to_proto(arg: &PyDict, py: Python<'_>, pickle: &PyObject) -> ProtoPyDict
                     data: Some(proto_py_any::Data::Boolean(x)),
                 },
             );
-        } else if let Ok(true) = py.is_instance::<pyo3::types::PyFloat,_>(a) {
+        } else if let Ok(true) = py.is_instance::<pyo3::types::PyFloat, _>(a) {
             let x = a.extract().unwrap();
             vec.insert(
                 key,
@@ -672,7 +700,7 @@ fn dict_to_proto(arg: &PyDict, py: Python<'_>, pickle: &PyObject) -> ProtoPyDict
                     data: Some(proto_py_any::Data::F32(x)),
                 },
             );
-        } else if let Ok(true) = py.is_instance::<pyo3::types::PyInt,_>(a) {
+        } else if let Ok(true) = py.is_instance::<pyo3::types::PyInt, _>(a) {
             vec.insert(
                 key,
                 ProtoPyAny {
@@ -735,4 +763,48 @@ where
     let bytes: &PyBytes = result.cast_as(py)?;
     let bytes = bytes.as_bytes().to_vec();
     Ok(bytes)
+}
+
+fn tuple_to_obj(py: Python<'_>, tuple: &ProtoPyTuple, src: &IrisObjectInternal) -> PyResult<PyObject>
+{
+    let mut vec = vec![];
+    for t in &tuple.items {
+        match &t.data {
+            Some(proto_py_any::Data::Boolean(x)) => {
+                vec.push(x.to_object(py));
+            }
+            Some(proto_py_any::Data::F32(x)) => {
+                vec.push(x.to_object(py));
+            }
+            Some(proto_py_any::Data::I64(x)) => {
+                vec.push(x.to_object(py));
+            }
+            Some(proto_py_any::Data::Str(x)) => {
+                vec.push(x.to_object(py));
+            }
+            Some(proto_py_any::Data::ObjectId(id)) => {
+                vec.push(
+                    IrisObjectInternal {
+                        inner: Arc::new(
+                            GuardedIrisObject {
+                                runtime_handle: src.inner.runtime_handle.clone(),
+                                client: src.inner.client.clone(),
+                                node_ref: NodeObject {
+                                    id: *id,
+                                    ..Default::default()
+                                },
+                                time_cost: Duration::default(),
+                            }
+                        )
+                    }.into_py(py)
+                )
+            }
+            Some(proto_py_any::Data::Tuple(tuple)) => {
+                println!("find tuple");
+                vec.push(tuple_to_obj(py, &tuple, src).unwrap());
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(PyTuple::new(py, vec).to_object(py))
 }

@@ -76,13 +76,11 @@ message TorchRpcCallRequest {
 }
 
 message NodeObject {
-  oneof value {
-    uint64 u64=1;
-  }
-  uint64 id = 3;
-  bytes exception = 4;
-  string location = 5;
-  string type = 6;
+  ProtoPyAny value = 1;
+  uint64 id = 2;
+  bytes exception = 3;
+  string location = 4;
+  string type = 5;
 }
 
 message GetAttrRequest {

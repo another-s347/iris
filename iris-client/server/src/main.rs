@@ -1,4 +1,5 @@
 use common::IrisObjectId;
+use dashmap::DashMap;
 use dict_derive::{FromPyObject, IntoPyObject};
 use futures::prelude::*;
 use futures::stream::TryStreamExt;
@@ -26,15 +27,12 @@ use tokio::net::UnixListener;
 use tokio::task;
 use tonic::{transport::Server, Request, Response, Status};
 use uuid;
-use dashmap::DashMap;
 #[derive(Debug, Clone)]
 struct IrisServer {
     modules: Arc<DashMap<String, Py<PyModule>>>,
     objects: Arc<DashMap<u64, Py<PyAny>>>,
     pickle: Py<PyModule>,
-    torch_rpc: Py<PyModule>,
-    torch_handlers: Arc<HashMap<&'static str, Py<PyAny>>>,
-    profile: Arc<dashmap::DashMap<&'static str, (usize, std::time::Duration)>>
+    profile: Arc<dashmap::DashMap<&'static str, (usize, std::time::Duration)>>,
 }
 
 fn dbg_py<T>(py: Python<'_>, x: PyResult<T>) -> PyResult<T> {
@@ -82,40 +80,6 @@ impl IrisServer {
         let bytes = bytes.as_bytes().to_vec();
         Ok(bytes)
     }
-
-    fn torch_remote<'a>(&'a self, py: Python<'a>, request: TorchRpcCallRequest) -> &'a PyAny {
-        let rpc = self.torch_rpc.as_ref(py);
-        // let (args, kwargs) = if let Some(arg) = request.arg {
-        //     let pickle = self.pickle.to_object(py);
-        //     (
-        //         map_args_to_local(py, arg.args, &pickle),
-        //         map_kwargs_to_local(py, arg.kwargs, &pickle),
-        //     )
-        // } else {
-        //     (PyTuple::empty(py).to_object(py), None)
-        // };
-        unimplemented!()
-        // let args:&[PyAny] = args.cast_as(py).unwrap().as_slice();
-        // let new_args: &[PyObject] = &[request.object_id.into_py(py), request.attr.into_py(py)];
-        // let key = request.torch_func.as_str();
-        // let a:&[PyObject] = &[request.target_node.as_str().into_py(py), self.torch_handlers.get(&key).unwrap().to_object(py)];
-        // let mut obj = rpc
-        //     .call(
-        //         "remote",
-        //         PyTuple::new(py, a.as_ref()),
-        //         Some(vec![("args", PyTuple::new(py, [new_args, &args].concat()))].into_py_dict(py)),
-        //     )
-        //     .unwrap();
-        // if request.to_here {
-        //     obj = dbg_py(py, obj.call_method0("to_here")).unwrap();
-        // }
-        // obj
-    }
-
-    // fn torch_rref(&self, py:Python<'_>, obj: PyAny) -> &PyAny {
-    //     let rpc = self.torch_rpc.as_ref(py);
-
-    // }
 }
 
 fn dumps<T>(pickle: &PyObject, py: Python<'_>, err: T) -> PyResult<Vec<u8>>
@@ -369,7 +333,7 @@ fn _call(
         (PyTuple::empty(py).to_object(py), None)
     };
     let o = maps.get(&request.object_id).unwrap().clone();
-    let mut o = o.as_ref(py);
+    let mut o: &PyAny = o.as_ref(py);
     if !request.attr.is_empty() {
         o = dbg_py(py, o.getattr(&request.attr)).unwrap();
     }
@@ -386,16 +350,81 @@ fn _call(
 
     maps.insert(id, Py::from(ret));
 
-    return Ok(NodeObject {
+    let mut nodeobj = NodeObject {
         id,
+        r#type: ret.get_type().name().to_string(),
         ..Default::default()
-    });
+    };
+
+    try_extract_native_value(ret, py, &mut nodeobj, &maps)?;
+
+    return Ok(nodeobj);
+}
+
+fn try_extract_native_value(
+    obj: &PyAny,
+    py: Python<'_>,
+    ret: &mut NodeObject,
+    maps: &DashMap<u64, Py<PyAny>>,
+) -> PyResult<()> {
+    if py.is_instance::<pyo3::types::PyBool, _>(obj)? {
+        let value: bool = obj.extract()?;
+        ret.value = Some(ProtoPyAny {
+            data: Some(proto_py_any::Data::Boolean(value)),
+        });
+    } else if py.is_instance::<pyo3::types::PyInt, _>(obj)? {
+        let value = obj.extract()?;
+        ret.value = Some(ProtoPyAny {
+            data: Some(proto_py_any::Data::I64(value)),
+        });
+    } else if py.is_instance::<pyo3::types::PyFloat, _>(obj)? {
+        let value = obj.extract()?;
+        ret.value = Some(ProtoPyAny {
+            data: Some(proto_py_any::Data::F32(value)),
+        });
+    } else if py.is_instance::<pyo3::types::PyString, _>(obj)? {
+        let value = obj.extract()?;
+        ret.value = Some(ProtoPyAny {
+            data: Some(proto_py_any::Data::Str(value)),
+        })
+    } else if py.is_instance::<pyo3::types::PyTuple, _>(obj)? {
+        let value: &PyTuple = obj.cast_as()?;
+        let mut vec = vec![];
+        for a in value {
+            if let Ok(x) = a.extract() {
+                vec.push(proto_py_any::Data::Boolean(x));
+            } else if let Ok(true) = py.is_instance::<pyo3::types::PyFloat, _>(a) {
+                vec.push(proto_py_any::Data::F32(a.extract().unwrap()));
+            } else if let Ok(true) = py.is_instance::<pyo3::types::PyInt, _>(a) {
+                vec.push(proto_py_any::Data::I64(a.extract().unwrap()));
+            } else if let Ok(x) = a.extract() {
+                vec.push(proto_py_any::Data::Str(x));
+            } else {
+                let mut hasher = DefaultHasher::new();
+                let id = uuid::Uuid::new_v4();
+                id.hash(&mut hasher);
+                let id = hasher.finish();
+                let obj = Py::from(a);
+                maps.insert(id, obj);
+                vec.push(proto_py_any::Data::ObjectId(id));
+            }
+        }
+        ret.value = Some(ProtoPyAny {
+            data: Some(proto_py_any::Data::Tuple(ProtoPyTuple {
+                items: vec
+                    .drain(0..)
+                    .map(|x| ProtoPyAny { data: Some(x) })
+                    .collect(),
+            })),
+        })
+    }
+    Ok(())
 }
 
 fn create_object(
     object_map: Arc<DashMap<u64, Py<PyAny>>>,
     modules: Arc<DashMap<String, Py<PyModule>>>,
-    py:Python<'_>,
+    py: Python<'_>,
     request: CreateRequest,
     pickle: &PyObject,
 ) -> PyResult<NodeObject> {
@@ -414,12 +443,13 @@ fn create_object(
             (PyTuple::empty(py).to_object(py), None)
         };
 
-        let new_object = m.call(
+        let ret = m.call(
             py,
             args.cast_as(py)?,
             kwargs.as_ref().map(|x| x.cast_as(py).unwrap()),
         )?;
-        let new_object = Py::from(new_object.as_ref(py));
+        let ret = ret.as_ref(py);
+        let new_object = Py::from(ret);
         let mut hasher = DefaultHasher::new();
         let id = uuid::Uuid::new_v4();
         id.hash(&mut hasher);
@@ -427,11 +457,15 @@ fn create_object(
 
         maps.insert(id, new_object);
 
-        return Ok(NodeObject {
-            location: "".to_owned(),
+        let mut nodeobj = NodeObject {
             id,
+            r#type: ret.get_type().name().to_string(),
             ..Default::default()
-        });
+        };
+
+        try_extract_native_value(ret, py, &mut nodeobj, &maps)?;
+
+        return Ok(nodeobj);
     } else {
         let err =
             PyErr::new::<exceptions::KeyError, _>(format!("Module {} not found.", request.module));
@@ -459,7 +493,7 @@ fn apply(
     let func = loads(&pickle, py, request.func.as_ref()).unwrap();
 
     let func = func.as_ref(py);
-    let obj = func
+    let ret = func
         .call(
             args.cast_as(py).unwrap(),
             kwargs.as_ref().map(|x| x.cast_as(py).unwrap()),
@@ -471,12 +505,17 @@ fn apply(
     id.hash(&mut hasher);
     let id = hasher.finish();
 
-    maps.insert(id, Py::from(obj));
+    maps.insert(id, Py::from(ret));
 
-    return Ok(NodeObject {
+    let mut nodeobj = NodeObject {
         id,
+        r#type: ret.get_type().name().to_string(),
         ..Default::default()
-    });
+    };
+
+    try_extract_native_value(ret, py, &mut nodeobj, &maps)?;
+
+    return Ok(nodeobj);
 }
 
 #[tonic::async_trait]
@@ -524,10 +563,9 @@ impl Greeter for IrisServer {
         .await
         .unwrap();
         let end = std::time::Instant::now();
-        let d:std::time::Duration = end - start;
-        self.profile.update("call", move|key, (count, value)|{
-            (count+1, *value + d)
-        });
+        let d: std::time::Duration = end - start;
+        self.profile
+            .update("call", move |key, (count, value)| (count + 1, *value + d));
         return Ok(Response::new(call_task));
     }
 
@@ -550,10 +588,9 @@ impl Greeter for IrisServer {
         .await
         .unwrap();
         let end = std::time::Instant::now();
-        let d:std::time::Duration = end - start;
-        self.profile.update("create", move|key, (count, value)|{
-            (count+1, *value + d)
-        });
+        let d: std::time::Duration = end - start;
+        self.profile
+            .update("create", move |key, (count, value)| (count + 1, *value + d));
         return Ok(Response::new(result));
     }
 
@@ -573,10 +610,9 @@ impl Greeter for IrisServer {
         .await
         .unwrap();
         let end = std::time::Instant::now();
-        let d:std::time::Duration = end - start;
-        self.profile.update("apply", move|key, (count, value)|{
-            (count+1, *value + d)
-        });
+        let d: std::time::Duration = end - start;
+        self.profile
+            .update("apply", move |key, (count, value)| (count + 1, *value + d));
         return Ok(Response::new(result));
     }
 
@@ -584,24 +620,7 @@ impl Greeter for IrisServer {
         &self,
         request: Request<TorchRpcCallRequest>,
     ) -> Result<Response<NodeObject>, Status> {
-        let request = request.into_inner();
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-
-        let obj = self.torch_remote(py, request);
-
-        let mut hasher = DefaultHasher::new();
-        let id = uuid::Uuid::new_v4();
-        id.hash(&mut hasher);
-        let id = hasher.finish();
-
-        let mut maps = &self.objects; //.lock().unwrap();
-        maps.insert(id, Py::from(obj));
-
-        return Ok(Response::new(NodeObject {
-            id,
-            ..Default::default()
-        }));
+        unimplemented!()
     }
 
     async fn get_attr(
@@ -626,9 +645,9 @@ impl Greeter for IrisServer {
         maps.insert(id, Py::from(obj));
 
         let end = std::time::Instant::now();
-        let d:std::time::Duration = end - start;
-        self.profile.update("getattr", move|key, (count, value)|{
-            (count+1, *value + d)
+        let d: std::time::Duration = end - start;
+        self.profile.update("getattr", move |key, (count, value)| {
+            (count + 1, *value + d)
         });
         return Ok(Response::new(NodeObject {
             id,
@@ -643,40 +662,7 @@ impl Greeter for IrisServer {
         let request = request.into_inner();
         let gil = Python::acquire_gil();
         let py = gil.python();
-
-        let mut maps = &self.objects; //.lock().unwrap();
-        let rpc: &PyModule = self.torch_rpc.as_ref(py);
-        let model:&Py<PyAny> = &maps.get(&request.object_id).unwrap();
-        let model: PyObject = model.into_py(py);
-        // let parameters = model.call_method0(py, "parameters").unwrap();
-        // let parameters:&pyo3::types::PySequence = parameters.cast_as(py).unwrap();
-        // let ret = PyList::empty(py);
-        // for p in parameters.list().unwrap() {
-        //     ret.append(rpc.call_method1("RRef", (p,)).unwrap()).unwrap();
-        // }
-        let ret = py.eval(
-            "[RRef(p) for p in model.parameters()]",
-            Some(
-                vec![
-                    ("model", model.as_ref(py)),
-                    ("RRef", rpc.get("RRef").unwrap()),
-                ]
-                .into_py_dict(py),
-            ),
-            None,
-        );
-        let ret = dbg_py(py, ret).unwrap();
-
-        let mut hasher = DefaultHasher::new();
-        let id = uuid::Uuid::new_v4();
-        id.hash(&mut hasher);
-        let id = hasher.finish();
-
-        maps.insert(id, Py::from(ret));
-        return Ok(Response::new(NodeObject {
-            id,
-            ..Default::default()
-        }));
+        unimplemented!();
     }
 
     async fn del_object(
@@ -686,14 +672,13 @@ impl Greeter for IrisServer {
         let start = std::time::Instant::now();
         let request = request.into_inner();
 
-        let mut maps = &self.objects;//.lock().unwrap();
+        let mut maps = &self.objects; //.lock().unwrap();
         maps.remove(&request.object_id);
 
         let end = std::time::Instant::now();
-        let d:std::time::Duration = end - start;
-        self.profile.update("del", move|key, (count, value)|{
-            (count+1, *value + d)
-        });
+        let d: std::time::Duration = end - start;
+        self.profile
+            .update("del", move |key, (count, value)| (count + 1, *value + d));
         return Ok(Response::new(ObjectId {
             id: request.object_id,
         }));
@@ -707,7 +692,7 @@ impl Greeter for IrisServer {
         let gil = Python::acquire_gil();
         let py = gil.python();
 
-        let maps = &self.objects;//.lock().unwrap();
+        let maps = &self.objects; //.lock().unwrap();
         let obj = maps.get(&request.object_id).unwrap();
 
         let data = self.serialize(py, obj.to_object(py)).unwrap();
@@ -743,80 +728,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Py::from(pickle)
     };
 
-    let torch_handlers = {
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-        let module = dbg_py(
-            py,
-            PyModule::from_code(
-                py,
-                r#"
-def torch_GetParameters(object_id, attr, *args, **kwargs):
-    return None
-    global service
-    # print("torch_GetParameters", object_id)
-    model = service.object_map[object_id]
-    return [rpc.RRef(p) for p in model.parameters()]
-
-
-def torch_CallWithObject(object_id, attr, *args, **kwargs):
-    return None
-    global service
-    o = service.object_map[object_id]
-    if attr:
-        o = getattr(o, attr)
-    result = o(*args, **kwargs)
-    return result
-
-
-def torch_GetObject(object_id, attr, *args, **kwargs):
-    return None
-    global service
-    o = service.object_map[object_id]
-    return o
-        "#,
-                "torch_handlers.py",
-                "torch_handlers",
-            ),
-        )
-        .unwrap();
-        let torch_CallWithObject_handler = module.get("torch_CallWithObject").unwrap();
-        let torch_GetParameters_handler = module.get("torch_GetParameters").unwrap();
-        let torch_GetObject_handler = module.get("torch_GetObject").unwrap();
-        let mut map = HashMap::new();
-        map.insert("torch_GetParameters", Py::from(torch_GetParameters_handler));
-        map.insert("torch_GetObject", Py::from(torch_GetObject_handler));
-        map.insert(
-            "torch_CallWithObject",
-            Py::from(torch_CallWithObject_handler),
-        );
-        // map.insert("test", Py::from(double));
-        map
-    };
-
-    let torch_rpc = {
-        #[derive(FromPyObject, IntoPyObject)]
-        struct Args {
-            rank: u64,
-            world_size: u64,
-        }
-
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-        let rpc = py.import("torch.distributed.rpc").unwrap();
-        let kwargs: PyObject = Args {
-            rank: opt.rank,
-            world_size: opt.world_size,
-        }
-        .into_py(py);
-        let name = format!("node{}", opt.rank);
-        // let result = rpc.call_method("init_rpc", (&name,), Some(
-        //     kwargs.cast_as(py).unwrap()
-        // ));
-        // dbg_py(py, result);
-        Py::from(rpc)
-    };
-
     let path = format!("/tmp/iris-tmp-node{}-{}.sock", opt.rank, opt.rank);
 
     tokio::fs::create_dir_all(Path::new(&path).parent().unwrap()).await?;
@@ -835,9 +746,7 @@ def torch_GetObject(object_id, attr, *args, **kwargs):
         modules: Arc::new(DashMap::new()),
         objects: Arc::new(DashMap::new()),
         pickle,
-        torch_rpc,
-        torch_handlers: Arc::new(torch_handlers),
-        profile: profile.clone()
+        profile: profile.clone(),
     };
     let p = profile.clone();
     let (tx, mut rx) = tokio::sync::broadcast::channel(1);

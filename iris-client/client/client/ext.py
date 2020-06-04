@@ -132,17 +132,26 @@ class IrisObject:
         self.node = node
         self.ctx = ctx
         self.id = IrisObjectId(inner.id())
+        self.value = inner.get_native_value()
+        self.type = inner.get_type()
         self.args = args
         self.kwargs = kwargs
+
+    def __repr__(self):
+        return f"Remote Object #{self.inner.id()} on {self.node}, Type {self.type}"
 
     """
     Get a copy of object in remote node
     """
     def get(self):
+        if self.value:
+            return self.value
         data = self.inner.get_value()
         return dill.loads(data)
 
     def __call__(self, *args, **kwargs):
+        if self.value:
+            raise NotImplementedError()
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.call(
             b_args=r_args,
@@ -155,7 +164,11 @@ class IrisObject:
             raise exception
         return IrisObject(r, self.node, self.ctx, args, kwargs)
     
-    def _call_with_attr(self, attr, args, kwargs=None):
+    def _call_with_attr(self, attr, args, kwargs={}):
+        if self.value:
+            if args == None:
+                return getattr(self.value, attr)()
+            return getattr(self.value, attr)(*args)
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.call(
             b_args=r_args,
@@ -216,6 +229,8 @@ class IrisObject:
         return self._call_with_attr('__next__', args=None)
 
     def __index__(self):
+        if self.value:
+            return getattr(self.value, '__index__')()
         return self._call_with_attr('__index__', args=None).get()
 
 class IrisModel:
