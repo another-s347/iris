@@ -1,4 +1,5 @@
 #![feature(async_closure)]
+use common::IrisObjectId;
 use futures::future::join_all;
 use futures::prelude::*;
 use hello_world::greeter_client::GreeterClient;
@@ -24,7 +25,6 @@ use tonic;
 use tonic::transport::{Endpoint, Uri};
 use tower::service_fn;
 use uuid;
-use common::IrisObjectId;
 
 type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
 type tonicResponseResult<T> = Result<tonic::Response<T>, tonic::Status>;
@@ -33,6 +33,13 @@ use proto::hello_world;
 
 pub mod context;
 use context::IrisContextInternal;
+
+#[derive(Clone)]
+struct ClientMem {}
+
+// impl ClientMem {
+//     pub fn insert_fetch_list(&self, fetch_list:)
+// }
 
 /// Represents a file that can be searched
 #[pyclass(module = "client")]
@@ -46,6 +53,7 @@ struct IrisClientInternal {
     pub client: RpcClient,
     pub async_tasks: HashMap<uuid::Uuid, AsyncIrisObjectTask>,
     pub node: String,
+    pub mem: ClientMem,
 }
 
 #[pyclass(module = "client")]
@@ -69,13 +77,14 @@ struct GuardedIrisObject {
     pub client: RpcClient,
     pub node_ref: NodeObject,
     pub time_cost: Duration,
+    pub mem_ref: ClientMem,
 }
 
 impl GuardedIrisObject {
     fn id(self: &Arc<Self>) -> IrisObjectId {
         IrisObjectId {
             id: self.node_ref.id,
-            location: self.node_ref.location.clone()
+            location: self.node_ref.location.clone(),
         }
     }
 
@@ -127,7 +136,14 @@ impl IrisObjectInternal {
         attr: Option<String>,
         pickle: &PyAny,
     ) -> Option<IrisObjectInternal> {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.inner.node_ref.location.as_str());
+        let arg = new_arg_request(
+            b_args,
+            b_kwargs,
+            recursive,
+            py,
+            &pickle.to_object(py),
+            self.inner.node_ref.location.as_str(),
+        );
 
         py.allow_threads(|| self._call(arg, attr))
     }
@@ -217,12 +233,16 @@ impl IrisObjectInternal {
                 arg,
                 attr: attr.unwrap_or_default(),
             })));
+        let result = task_handle.unwrap().into_inner();
+        let node_ref = result.obj.unwrap();
+        let fetch_list = result.fetch_result;
         Some(IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.inner.runtime_handle.clone(),
                 client,
-                node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
+                node_ref,
                 time_cost: Instant::now() - start,
+                mem_ref: self.inner.mem_ref.clone(),
             }),
         })
     }
@@ -241,6 +261,7 @@ impl IrisObjectInternal {
                 client,
                 node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
                 time_cost: Instant::now() - start,
+                mem_ref: self.inner.mem_ref.clone(),
             }),
         }
     }
@@ -252,13 +273,16 @@ impl IrisClientInternal {
         let task_handle = self
             .runtime_handle
             .block_on(self.client.create_object(tonic::Request::new(request)));
-
+        let result = task_handle.unwrap().into_inner();
+        let node_ref = result.obj.unwrap();
+        let fetch_list = result.fetch_result;
         IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),
                 client: self.client.clone(),
-                node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
+                node_ref,
                 time_cost: Instant::now() - start,
+                mem_ref: self.mem.clone(),
             }),
         }
     }
@@ -274,15 +298,15 @@ impl IrisClientInternal {
         let task_handle = self
             .runtime_handle
             .block_on(self.client.torch_call(tonic::Request::new(request)));
-
-        IrisObjectInternal {
-            inner: Arc::new(GuardedIrisObject {
-                runtime_handle: self.runtime_handle.clone(),
-                client: self.client.clone(),
-                node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
-                time_cost: Instant::now() - start,
-            }),
-        }
+        unimplemented!()
+        // IrisObjectInternal {
+        //     inner: Arc::new(GuardedIrisObject {
+        //         runtime_handle: self.runtime_handle.clone(),
+        //         client: self.client.clone(),
+        //         node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
+        //         time_cost: Instant::now() - start,
+        //     }),
+        // }
     }
 
     fn _torch_call_async(
@@ -291,19 +315,20 @@ impl IrisClientInternal {
     ) -> JoinHandle<IrisObjectInternal> {
         let mut client = self.client.clone();
         let runtime_handle = self.runtime_handle.clone();
-        let task_handle = self.runtime_handle.spawn(async move {
-            let start = Instant::now();
-            let result = client.torch_call(tonic::Request::new(request)).await;
-            IrisObjectInternal {
-                inner: Arc::new(GuardedIrisObject {
-                    client,
-                    runtime_handle,
-                    node_ref: result.map(|x| x.into_inner()).unwrap(),
-                    time_cost: Instant::now() - start,
-                }),
-            }
-        });
-        task_handle
+        unimplemented!()
+        // let task_handle = self.runtime_handle.spawn(async move {
+        //     let start = Instant::now();
+        //     let result = client.torch_call(tonic::Request::new(request)).await;
+        //     IrisObjectInternal {
+        //         inner: Arc::new(GuardedIrisObject {
+        //             client,
+        //             runtime_handle,
+        //             node_ref: result.map(|x| x.into_inner()).unwrap(),
+        //             time_cost: Instant::now() - start,
+        //         }),
+        //     }
+        // });
+        // task_handle
     }
 
     fn _get_parameter(&mut self, request: GetParameterRequest) -> IrisObjectInternal {
@@ -318,6 +343,7 @@ impl IrisClientInternal {
                 client: self.client.clone(),
                 node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
                 time_cost: Instant::now() - start,
+                mem_ref: self.mem.clone(),
             }),
         }
     }
@@ -329,6 +355,7 @@ impl IrisClientInternal {
         let start = Instant::now();
         let mut client = self.client.clone();
         let runtime_handle = self.runtime_handle.clone();
+        let mem = self.mem.clone();
         let task_handle = self.runtime_handle.spawn(async move {
             let result = client.get_parameter(tonic::Request::new(request)).await;
             IrisObjectInternal {
@@ -337,6 +364,7 @@ impl IrisClientInternal {
                     runtime_handle,
                     node_ref: result.map(|x| x.into_inner()).unwrap(),
                     time_cost: Instant::now() - start,
+                    mem_ref: mem,
                 }),
             }
         });
@@ -348,13 +376,16 @@ impl IrisClientInternal {
         let task_handle = self
             .runtime_handle
             .block_on(self.client.apply(tonic::Request::new(request)));
-
+        let result = task_handle.unwrap().into_inner();
+        let node_ref = result.obj.unwrap();
+        let fetch_list = result.fetch_result;
         IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),
                 client: self.client.clone(),
-                node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
+                node_ref,
                 time_cost: Instant::now() - start,
+                mem_ref: self.mem.clone(),
             }),
         }
     }
@@ -405,7 +436,14 @@ impl IrisClientInternal {
         recursive: Option<bool>,
         pickle: &PyAny,
     ) -> IrisObjectInternal {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.node.as_str());
+        let arg = new_arg_request(
+            b_args,
+            b_kwargs,
+            recursive,
+            py,
+            &pickle.to_object(py),
+            self.node.as_str(),
+        );
         let request = ApplyRequest { arg, func };
         py.allow_threads(|| self._apply(request))
     }
@@ -425,6 +463,28 @@ impl IrisClientInternal {
         AsyncTaskKey { uuid: key }
     }
 
+    fn get_remote_object(&mut self, py: Python<'_>, obj: &IrisObjectInternal) -> IrisObjectInternal {
+        let start = std::time::Instant::now();
+        let id = obj.inner.id();
+        let request = NodeObjectRef {
+            id: id.id,
+            location: id.location,
+        };
+        let node_ref = py.allow_threads(|| {
+            self.runtime_handle
+                .block_on(self.client.get_remote_object(tonic::Request::new(request)))
+        }).unwrap().into_inner();
+        IrisObjectInternal {
+            inner: Arc::new(GuardedIrisObject {
+                runtime_handle: self.runtime_handle.clone(),
+                client: self.client.clone(),
+                node_ref,
+                time_cost: Instant::now() - start,
+                mem_ref: self.mem.clone(),
+            }),
+        }
+    }
+
     fn create_object(
         &mut self,
         py: Python<'_>,
@@ -435,7 +495,14 @@ impl IrisClientInternal {
         recursive: Option<bool>,
         pickle: &PyAny,
     ) -> PyResult<IrisObjectInternal> {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.node.as_str());
+        let arg = new_arg_request(
+            b_args,
+            b_kwargs,
+            recursive,
+            py,
+            &pickle.to_object(py),
+            self.node.as_str(),
+        );
         let request = CreateRequest {
             module: module.to_owned(),
             qualname: qualname.to_owned(),
@@ -475,7 +542,14 @@ impl IrisClientInternal {
         to_here: bool,
         pickle: &PyAny,
     ) -> PyResult<IrisObjectInternal> {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.node.as_str());
+        let arg = new_arg_request(
+            b_args,
+            b_kwargs,
+            recursive,
+            py,
+            &pickle.to_object(py),
+            self.node.as_str(),
+        );
         let request = TorchRpcCallRequest {
             target_node: target_node.to_owned(),
             object_id,
@@ -500,7 +574,14 @@ impl IrisClientInternal {
         to_here: bool,
         pickle: &PyAny,
     ) -> AsyncTaskKey {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.node.as_str());
+        let arg = new_arg_request(
+            b_args,
+            b_kwargs,
+            recursive,
+            py,
+            &pickle.to_object(py),
+            self.node.as_str(),
+        );
         let request = TorchRpcCallRequest {
             target_node: target_node.to_owned(),
             object_id,
@@ -728,9 +809,9 @@ fn list_to_proto(
             vec.push(proto_py_any::Data::Str(x));
         } else if let Ok(x) = a.extract::<common::IrisObjectId>() {
             vec.push(proto_py_any::Data::ObjectId(NodeObjectRef {
-                    id: x.id,
-                    location: x.location.clone(),
-                }));
+                id: x.id,
+                location: x.location.clone(),
+            }));
             if x.location != current_location {
                 fetch_list.push(NodeObjectRef {
                     id: x.id,
@@ -903,6 +984,7 @@ fn tuple_to_obj(
                             ..Default::default()
                         },
                         time_cost: Duration::default(),
+                        mem_ref: src.inner.mem_ref.clone(),
                     }),
                 }
                 .into_py(py),

@@ -25,12 +25,19 @@ class IrisContext:
         self.client_wrapper = {}
     
     def setup(self):
-        self.client_wrapper["node0"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node0-0.sock"), "node0", self)
-        # self.client_wrapper["node1"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node1-1.sock"), "node1", self)
+        self.client_wrapper["node0"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node-127.0.0.1-12345.sock", f"node127.0.0.1:12345"), "node0", self)
+        self.client_wrapper["node1"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node-127.0.0.1-12346.sock", f"node127.0.0.1:12346"), "node1", self)
         # self.client_wrapper["node2"] = IrisClientWrapper(self.inner.connect("/tmp/iris-tmp-node2-2.sock"), "node2", self)
         self.client_wrapper["node0"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=0)
-        # self.client_wrapper["node1"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=1)
+        self.client_wrapper["node1"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=1)
         # self.client_wrapper["node2"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=2)
+        self.client_wrapper["node0"].inner.connect_nodes({
+            "node127.0.0.1:12346":"http://127.0.0.1:12346"
+        })
+        self.client_wrapper["node1"].inner.connect_nodes({
+            "node127.0.0.1:12345":"http://127.0.0.1:12345"
+        })
+
 
     def create_object(self, node, module, recursive, *args, **kwargs):
         inner_client = self.client_wrapper[node]
@@ -131,14 +138,14 @@ class IrisObject:
         self.inner = inner
         self.node = node
         self.ctx = ctx
-        self.id = IrisObjectId(inner.id())
+        self.id = inner.id()
         self.value = inner.get_native_value()
         self.type = inner.get_type()
         self.args = args
         self.kwargs = kwargs
 
     def __repr__(self):
-        return f"Remote Object #{self.inner.id()} on {self.node}, Type {self.type}"
+        return f"Remote Object #{self.inner.id().id} on {self.node}, Type {self.type}"
 
     """
     Get a copy of object in remote node
@@ -183,6 +190,9 @@ class IrisObject:
     
     def keys(self):
         return self._call_with_attr('keys', args=None)
+    
+    def to_node(self, node):
+        return self.ctx.client_wrapper[node].get_remote_object(self)
 
     def __getattr__(self, attr):
         r = self.inner.get_attr(attr)
@@ -233,31 +243,82 @@ class IrisObject:
             return getattr(self.value, '__index__')()
         return self._call_with_attr('__index__', args=None).get()
 
+class RemoteTensorGroup:
+    def __init__(self):
+        super().__init__()
+        self.inputs = []
+        self.outputs = {}
+
+    def add_input(self, source, this):
+        source.incr_output()
+        self.inputs.append((this, source))
+
+    def add_output(self, tensor):
+        object_id = tensor.id.id
+        if object_id in self.outputs:
+            self.outputs[object_id][0] += 1
+        else:
+            self.outputs[object_id] = [0, tensor]
+    
+    def backward(self, tensor, grad):
+        object_id = tensor.id.id
+        if self.outputs[object_id][0] == 1:
+            self.outputs[object_id][1].backward(grad)
+        else:
+            self.outputs[object_id][1].backward(grad, retain_graph=True)
+            self.outputs[object_id][0] -= 1
+        for input_this, input_source in self.inputs:
+            input_source.backward(input_this.grad)
+
+class RemoteTensor:
+    def __init__(self, inner, group = None):
+        super().__init__()
+        self.inner = inner
+        self.group = group if group else RemoteTensorGroup()
+        self.parents = [p[1] for p in self.group.inputs]
+    
+    def incr_output(self):
+        self.group.add_output(self.inner)
+
+    def backward(self, grad=None):
+        # if grad is not None:
+        #     print(grad.get())
+        # else:
+        #     print("none")
+        # print("none" if not grad else grad.get())
+        self.group.backward(self.inner, grad)
+
+    def sum(self):
+        ret = self.inner.sum()
+        self.group.add_output(ret)
+        return RemoteTensor(ret, self.group)
+
 class IrisModel:
-    def __init__(self, model, ctx, optimizer):
+    def __init__(self, model):
         super().__init__()
         self.model = model
-        self.ctx = ctx
-        self.optimizer = optimizer
-        self.train = True
     
-    def forward(self, *args, **kwargs):
-        if self.train:
-            r_args, holds_ref = retrieve_args(self, self.optimizer.node, self.ctx, args)
-            r_a = self.ctx.client_wrapper[self.optimizer.node].inner.torch_call(
-                target_node=self.model.node,
-                object_id=self.model.id.id,
-                to_here=True,
-                b_args=r_args,
-                b_kwargs=kwargs,
-                pickle=dill
-            )
-            return IrisObject(r_a, self.optimizer.node, self.ctx, args, kwargs)
-        else:
-            return self.model.forward(*args, **kwargs)
+    def forward(self, *args):
+        r_args = []
+        input_pair = []
+        group = RemoteTensorGroup()
+        for a in args:
+            if type(a) is RemoteTensor:
+                if a.inner.node != self.model.node:
+                    this = a.inner.to_node(self.model.node)
+                    group.add_input(a, this)
+                    r_args.append(this)
+                else:
+                    r_args.append(a.inner)
+            else:
+                r_args.append(a)
+        ret = self.model(*r_args)
+        group.add_output(ret)
+        ret = RemoteTensor(ret, group)
+        return ret
 
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
+    def __call__(self, *args):
+        return self.forward(*args)
 
 class IrisAsyncTask:
     def __init__(self, inner, client):
@@ -329,23 +390,17 @@ class IrisClientWrapper:
             raise exception
         return IrisObject(r, self.node, self.ctx, args, kwargs)
     
+    def get_remote_object(self, obj):
+        r = self.inner.get_remote_object(obj.inner)
+        return IrisObject(r, self.node, self.ctx, None, None)
+    
 def retrieve_args(self, node, ctx, args, recursive=False, cls=tuple):
     if args is None:
         return None, None
     a = []
     holds_ref = []
     for arg in args:
-        if type(arg) is IrisObject and arg.node != node:
-            r_a = ctx.client_wrapper[node].inner.torch_call(
-                target_node=arg.node,
-                object_id=arg.id.id,
-                torch_func="torch_GetObject",
-                to_here=True,
-                pickle=dill
-            )
-            holds_ref.append(r_a)
-            a.append(IrisObjectId(r_a.id()))
-        elif type(arg) is IrisObject:
+        if type(arg) is IrisObject:
             a.append(arg.id)
         elif recursive and type(arg) is list:
             rr = retrieve_args(self, node, ctx, a, recursive, list)

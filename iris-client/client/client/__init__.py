@@ -1,5 +1,5 @@
 from .client import WordCounter, count_line, IrisClientInternal, IrisObjectInternal, IrisContextInternal, IrisObjectId
-from client.ext import IrisContext, IrisClientWrapper, IrisGradContext, IrisObject, IrisOptimizer, IrisModel, retrieve_args
+from client.ext import IrisContext, IrisClientWrapper, IrisGradContext, IrisObject, IrisOptimizer, IrisModel, RemoteTensor
 __all__ = [
     "WordCounter", 
     "count_line", 
@@ -13,7 +13,8 @@ __all__ = [
     "IrisModel",
     "AsyncTest",
     "IrisObjectId",
-    "retrieve_args"
+    "retrieve_args",
+    "RemoteTensor"
     ]
 
 

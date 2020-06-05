@@ -65,7 +65,8 @@ impl IrisContextInternal {
             runtime_handle: self.runtime.handle().clone(),
             client: client.unwrap(),
             async_tasks: Default::default(),
-            node
+            node,
+            mem: crate::ClientMem {}
         })
     }
 

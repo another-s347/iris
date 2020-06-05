@@ -93,13 +93,13 @@ impl IrisServer {
     }
 
     // TODO: Optimize?
-    async fn fetch_remote(&self, fetch_list: &Vec<NodeObjectRef>) {
+    async fn fetch_remote(&self, fetch_list: &Vec<NodeObjectRef>) -> HashMap<u64, u64> {
         if fetch_list.len() == 0 {
-            return;
+            return Default::default();
         }
         let mut bytes_c = 0;
         let start = std::time::Instant::now();
-        if fetch_list.len() == 1 {
+        let result = if fetch_list.len() == 1 {
             let mut o = fetch_list.first().unwrap();
             let node: &distributed::DistributedClient = &self.nodes.get(&o.location).unwrap();
             let recv_start = std::time::Instant::now();
@@ -110,7 +110,7 @@ impl IrisServer {
                 .unwrap()
                 .into_inner();
             let mid = std::time::Instant::now();
-            println!("recv {:?}", mid-recv_start);
+            println!("recv {:?}", mid - recv_start);
             let o = o.clone();
             let map = self.objects.clone();
             let pickle = self.pickle.clone();
@@ -119,11 +119,18 @@ impl IrisServer {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
+                let mut hasher = DefaultHasher::new();
+                let id = uuid::Uuid::new_v4();
+                id.hash(&mut hasher);
+                let id = hasher.finish();
                 let obj = loads(&pickle, py, data.data.as_ref()).unwrap();
                 map.insert(o.id, Py::from(obj.as_ref(py)));
+                let mut result = HashMap::new();
+                result.insert(o.id, o.id);
+                result
             })
             .await
-            .unwrap();
+            .unwrap()
         } else {
             let mut nodes = Vec::with_capacity(fetch_list.len());
             for n in fetch_list {
@@ -144,17 +151,25 @@ impl IrisServer {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
+                let mut ret = HashMap::new();
                 for (b, r) in result {
                     let obj = loads(&pickle, py, b.data.as_ref()).unwrap();
+                    let mut hasher = DefaultHasher::new();
+                    let id = uuid::Uuid::new_v4();
+                    id.hash(&mut hasher);
+                    let id = hasher.finish();
                     map.insert(r.id, Py::from(obj.as_ref(py)));
+                    ret.insert(r.id, r.id);
                 }
+                ret
             })
             .await
-            .unwrap();
-        }
+            .unwrap()
+        };
 
         let end = std::time::Instant::now();
         println!("{:?}, bytes {}", end - start, bytes_c);
+        return result;
     }
 }
 
@@ -653,12 +668,14 @@ impl Greeter for IrisServer {
         }));
     }
 
-    async fn call(&self, request: Request<CallRequest>) -> Result<Response<NodeObject>, Status> {
+    async fn call(&self, request: Request<CallRequest>) -> Result<Response<RemoteResult>, Status> {
         let start = std::time::Instant::now();
         let request: CallRequest = request.into_inner();
-        if let Some(arg) = &request.arg {
-            self.fetch_remote(&arg.fetch_lists).await;
-        }
+        let fetch_list = if let Some(arg) = &request.arg {
+            self.fetch_remote(&arg.fetch_lists).await
+        } else {
+            Default::default()
+        };
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
         let name = self.current_node.clone();
@@ -675,18 +692,23 @@ impl Greeter for IrisServer {
         let d: std::time::Duration = end - start;
         self.profile
             .update("call", move |key, (count, value)| (count + 1, *value + d));
-        return Ok(Response::new(call_task));
+        return Ok(Response::new(RemoteResult {
+            obj: Some(call_task),
+            fetch_result: fetch_list,
+        }));
     }
 
     async fn create_object(
         &self,
         request: Request<CreateRequest>,
-    ) -> Result<Response<NodeObject>, Status> {
+    ) -> Result<Response<RemoteResult>, Status> {
         let start = std::time::Instant::now();
         let request = request.into_inner();
-        if let Some(arg) = &request.arg {
-            self.fetch_remote(&arg.fetch_lists).await;
-        }
+        let fetch_list = if let Some(arg) = &request.arg {
+            self.fetch_remote(&arg.fetch_lists).await
+        } else {
+            Default::default()
+        };
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
         let modules = self.modules.clone();
@@ -704,15 +726,23 @@ impl Greeter for IrisServer {
         let d: std::time::Duration = end - start;
         self.profile
             .update("create", move |key, (count, value)| (count + 1, *value + d));
-        return Ok(Response::new(result));
+        return Ok(Response::new(RemoteResult {
+            obj: Some(result),
+            fetch_result: fetch_list,
+        }));
     }
 
-    async fn apply(&self, request: Request<ApplyRequest>) -> Result<Response<NodeObject>, Status> {
+    async fn apply(
+        &self,
+        request: Request<ApplyRequest>,
+    ) -> Result<Response<RemoteResult>, Status> {
         let start = std::time::Instant::now();
         let request = request.into_inner();
-        if let Some(arg) = &request.arg {
-            self.fetch_remote(&arg.fetch_lists).await;
-        }
+        let fetch_list = if let Some(arg) = &request.arg {
+            self.fetch_remote(&arg.fetch_lists).await
+        } else {
+            Default::default()
+        };
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
         let modules = self.modules.clone();
@@ -730,7 +760,26 @@ impl Greeter for IrisServer {
         let d: std::time::Duration = end - start;
         self.profile
             .update("apply", move |key, (count, value)| (count + 1, *value + d));
-        return Ok(Response::new(result));
+        return Ok(Response::new(RemoteResult {
+            obj: Some(result),
+            fetch_result: fetch_list,
+        }));
+    }
+
+    async fn get_remote_object(
+        &self,
+        request: Request<NodeObjectRef>,
+    ) -> Result<Response<NodeObject>, Status> {
+        let request = request.into_inner();
+        let id = request.id;
+        let request = vec![request];
+        let result: HashMap<u64, u64> = self.fetch_remote(&request).await;
+        let id = *result.get(&id).unwrap();
+        return Ok(Response::new(NodeObject {
+            id,
+            location: self.current_node.as_str().to_string(),
+            ..Default::default()
+        }));
     }
 
     async fn torch_call(
@@ -758,7 +807,7 @@ impl Greeter for IrisServer {
         let obj = maps.get(&request.object_id).unwrap();
         let obj = obj.to_object(py);
         let obj = obj.as_ref(py);
-        let obj = dbg_py(py, obj.getattr(request.attr.as_str())).unwrap();
+        let obj = dbg_py(py, obj.getattr(request.attr.as_str())).expect(request.attr.as_str());
         maps.insert(id, Py::from(obj));
 
         let end = std::time::Instant::now();

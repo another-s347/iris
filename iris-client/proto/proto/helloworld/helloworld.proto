@@ -10,16 +10,22 @@ package helloworld;
 service Greeter {
   // Sends a greeting
   rpc SayHello (HelloRequest) returns (HelloReply) {}
-  rpc CreateObject (CreateRequest) returns (NodeObject) {}
+  rpc CreateObject (CreateRequest) returns (RemoteResult) {}
   rpc ConnectNodes (ConnectRequest) returns (HelloReply) {}
   rpc Init (InitRequest) returns (NodeObject) {}
-  rpc Call (CallRequest) returns (NodeObject) {}
-  rpc Apply (ApplyRequest) returns (NodeObject) {}
+  rpc Call (CallRequest) returns (RemoteResult) {}
+  rpc Apply (ApplyRequest) returns (RemoteResult) {}
   rpc TorchCall(TorchRpcCallRequest) returns (NodeObject) {}
   rpc GetAttr(GetAttrRequest) returns (NodeObject) {}
   rpc GetParameter(GetParameterRequest) returns (NodeObject) {}
   rpc GetValue(GetParameterRequest) returns (Value) {}
   rpc DelObject(GetParameterRequest) returns (ObjectId) {}
+  rpc GetRemoteObject(NodeObjectRef) returns (NodeObject) {}
+}
+
+message RemoteResult {
+  NodeObject obj = 1;
+  map<uint64, uint64> fetch_result = 2;
 }
 
 // The request message containing the user's name.
