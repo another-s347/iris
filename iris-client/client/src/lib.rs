@@ -24,6 +24,7 @@ use tonic;
 use tonic::transport::{Endpoint, Uri};
 use tower::service_fn;
 use uuid;
+use common::IrisObjectId;
 
 type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
 type tonicResponseResult<T> = Result<tonic::Response<T>, tonic::Status>;
@@ -44,6 +45,7 @@ struct IrisClientInternal {
     pub runtime_handle: tokio::runtime::Handle,
     pub client: RpcClient,
     pub async_tasks: HashMap<uuid::Uuid, AsyncIrisObjectTask>,
+    pub node: String,
 }
 
 #[pyclass(module = "client")]
@@ -70,8 +72,11 @@ struct GuardedIrisObject {
 }
 
 impl GuardedIrisObject {
-    fn id(self: &Arc<Self>) -> u64 {
-        self.as_ref().node_ref.id
+    fn id(self: &Arc<Self>) -> IrisObjectId {
+        IrisObjectId {
+            id: self.node_ref.id,
+            location: self.node_ref.location.clone()
+        }
     }
 
     fn time_cost_as_sec(self: &Arc<Self>) -> f64 {
@@ -107,7 +112,7 @@ impl Drop for GuardedIrisObject {
 impl IrisObjectInternal {
     fn get_value<'p>(&mut self, py: Python<'p>) -> Option<&'p PyBytes> {
         let request = GetParameterRequest {
-            object_id: self.inner.id(),
+            object_id: self.inner.node_ref.id,
         };
         let data = py.allow_threads(|| self._get_value(request));
         return data.map(|x| PyBytes::new(py, x.as_ref()));
@@ -122,7 +127,7 @@ impl IrisObjectInternal {
         attr: Option<String>,
         pickle: &PyAny,
     ) -> Option<IrisObjectInternal> {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py));
+        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.inner.node_ref.location.as_str());
 
         py.allow_threads(|| self._call(arg, attr))
     }
@@ -130,12 +135,12 @@ impl IrisObjectInternal {
     fn get_attr(&mut self, py: Python<'_>, attr: String) -> Option<IrisObjectInternal> {
         let request = GetAttrRequest {
             attr,
-            object_id: self.inner.id(),
+            object_id: self.inner.node_ref.id,
         };
         Some(py.allow_threads(|| self._get_attr(request)))
     }
 
-    fn id(&self) -> u64 {
+    fn id(&self) -> IrisObjectId {
         self.inner.id()
     }
 
@@ -155,9 +160,7 @@ impl IrisObjectInternal {
             }) => x.to_object(py),
             Some(ProtoPyAny {
                 data: Some(proto_py_any::Data::Tuple(tuple)),
-            }) => {
-                tuple_to_obj(py, tuple, self).unwrap()
-            }
+            }) => tuple_to_obj(py, tuple, self).unwrap(),
             _ => py.None(),
             None => py.None(),
         }
@@ -210,7 +213,7 @@ impl IrisObjectInternal {
             .inner
             .runtime_handle
             .block_on(client.call(tonic::Request::new(CallRequest {
-                object_id: self.id(),
+                object_id: self.inner.node_ref.id,
                 arg,
                 attr: attr.unwrap_or_default(),
             })));
@@ -402,7 +405,7 @@ impl IrisClientInternal {
         recursive: Option<bool>,
         pickle: &PyAny,
     ) -> IrisObjectInternal {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py));
+        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.node.as_str());
         let request = ApplyRequest { arg, func };
         py.allow_threads(|| self._apply(request))
     }
@@ -432,7 +435,7 @@ impl IrisClientInternal {
         recursive: Option<bool>,
         pickle: &PyAny,
     ) -> PyResult<IrisObjectInternal> {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py));
+        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.node.as_str());
         let request = CreateRequest {
             module: module.to_owned(),
             qualname: qualname.to_owned(),
@@ -472,7 +475,7 @@ impl IrisClientInternal {
         to_here: bool,
         pickle: &PyAny,
     ) -> PyResult<IrisObjectInternal> {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py));
+        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.node.as_str());
         let request = TorchRpcCallRequest {
             target_node: target_node.to_owned(),
             object_id,
@@ -497,7 +500,7 @@ impl IrisClientInternal {
         to_here: bool,
         pickle: &PyAny,
     ) -> AsyncTaskKey {
-        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py));
+        let arg = new_arg_request(b_args, b_kwargs, recursive, py, &pickle.to_object(py), self.node.as_str());
         let request = TorchRpcCallRequest {
             target_node: target_node.to_owned(),
             object_id,
@@ -512,6 +515,21 @@ impl IrisClientInternal {
         let key = uuid::Uuid::new_v4();
         self.async_tasks.insert(key, task);
         AsyncTaskKey { uuid: key }
+    }
+
+    fn connect_nodes(&mut self, py: Python<'_>, mut nodes: HashMap<String, String>) {
+        let request = ConnectRequest {
+            nodes: nodes
+                .drain()
+                .map(|(name, address)| Node { name, address })
+                .collect(),
+        };
+        let mut client = self.client.clone();
+        py.allow_threads(|| {
+            self.runtime_handle
+                .block_on(async move { client.connect_nodes(tonic::Request::new(request)).await })
+                .unwrap()
+        });
     }
 }
 
@@ -596,29 +614,50 @@ fn new_arg_request(
     recursive: Option<bool>,
     py: Python<'_>,
     pickle: &PyObject,
+    current_location: &str,
 ) -> Option<CallArgs> {
     match (b_args, b_kwargs) {
         (None, None) => None,
-        (Some(args), None) => Some(CallArgs {
-            args: Some(tuple_to_proto(&args, py, pickle)),
-            kwargs: None,
-            recursive: recursive.unwrap_or_default(),
-        }),
-        (None, Some(kwargs)) => Some(CallArgs {
-            args: None,
-            kwargs: Some(dict_to_proto(&kwargs, py, pickle)),
-            recursive: recursive.unwrap_or_default(),
-        }),
-        (Some(args), Some(kwargs)) => Some(CallArgs {
-            args: Some(tuple_to_proto(&args, py, pickle)),
-            kwargs: Some(dict_to_proto(&kwargs, py, pickle)),
-            recursive: recursive.unwrap_or_default(),
-        }),
+        (Some(args), None) => {
+            let (tuple, f) = tuple_to_proto(&args, py, pickle, current_location);
+            Some(CallArgs {
+                args: Some(tuple),
+                kwargs: None,
+                // recursive: recursive.unwrap_or_default(),
+                fetch_lists: f,
+            })
+        }
+        (None, Some(kwargs)) => {
+            let (dict, f) = dict_to_proto(&kwargs, py, pickle, current_location);
+            Some(CallArgs {
+                args: None,
+                kwargs: Some(dict),
+                // recursive: recursive.unwrap_or_default(),
+                fetch_lists: f,
+            })
+        }
+        (Some(args), Some(kwargs)) => {
+            let (dict, mut f) = dict_to_proto(&kwargs, py, pickle, current_location);
+            let (tuple, mut f2) = tuple_to_proto(&args, py, pickle, current_location);
+            f2.append(&mut f);
+            Some(CallArgs {
+                args: Some(tuple),
+                kwargs: Some(dict),
+                // recursive: recursive.unwrap_or_default(),
+                fetch_lists: f2,
+            })
+        }
     }
 }
 
-fn tuple_to_proto(arg: &PyTuple, py: Python<'_>, pickle: &PyObject) -> ProtoPyTuple {
+fn tuple_to_proto(
+    arg: &PyTuple,
+    py: Python<'_>,
+    pickle: &PyObject,
+    current_location: &str,
+) -> (ProtoPyTuple, Vec<NodeObjectRef>) {
     let mut vec = vec![];
+    let mut fetch_list = vec![];
     for a in arg.iter() {
         if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Boolean(x));
@@ -629,28 +668,55 @@ fn tuple_to_proto(arg: &PyTuple, py: Python<'_>, pickle: &PyObject) -> ProtoPyTu
         } else if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Str(x));
         } else if let Ok(x) = a.extract::<common::IrisObjectId>() {
-            vec.push(proto_py_any::Data::ObjectId(x.id));
+            if x.location != current_location {
+                fetch_list.push(NodeObjectRef {
+                    id: x.id,
+                    location: x.location.clone(),
+                });
+            }
+            vec.push(proto_py_any::Data::ObjectId(NodeObjectRef {
+                id: x.id,
+                location: x.location.clone(),
+            }));
         } else if let Ok(list) = a.cast_as() {
-            vec.push(proto_py_any::Data::List(list_to_proto(list, py, pickle)))
+            vec.push(proto_py_any::Data::List(list_to_proto(
+                list,
+                py,
+                pickle,
+                current_location,
+            )))
         } else if let Ok(tuple) = a.cast_as() {
-            vec.push(proto_py_any::Data::Tuple(tuple_to_proto(tuple, py, pickle)));
+            let (tuple, mut f) = tuple_to_proto(tuple, py, pickle, current_location);
+            fetch_list.append(&mut f);
+            vec.push(proto_py_any::Data::Tuple(tuple));
         } else if let Ok(dict) = a.cast_as() {
-            vec.push(proto_py_any::Data::Dict(dict_to_proto(dict, py, pickle)));
+            let (dict, mut f) = dict_to_proto(dict, py, pickle, current_location);
+            fetch_list.append(&mut f);
+            vec.push(proto_py_any::Data::Dict(dict));
         } else {
             let bytes = serialize(pickle, py, a).unwrap();
             vec.push(proto_py_any::Data::Bytes(bytes));
         }
     }
-    ProtoPyTuple {
-        items: vec
-            .drain(0..)
-            .map(|x| ProtoPyAny { data: Some(x) })
-            .collect(),
-    }
+    (
+        ProtoPyTuple {
+            items: vec
+                .drain(0..)
+                .map(|x| ProtoPyAny { data: Some(x) })
+                .collect(),
+        },
+        fetch_list,
+    )
 }
 
-fn list_to_proto(arg: &PyList, py: Python<'_>, pickle: &PyObject) -> ProtoPyList {
+fn list_to_proto(
+    arg: &PyList,
+    py: Python<'_>,
+    pickle: &PyObject,
+    current_location: &str,
+) -> ProtoPyList {
     let mut vec = vec![];
+    let mut fetch_list = vec![];
     for a in arg.iter() {
         if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Boolean(x));
@@ -661,13 +727,31 @@ fn list_to_proto(arg: &PyList, py: Python<'_>, pickle: &PyObject) -> ProtoPyList
         } else if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Str(x));
         } else if let Ok(x) = a.extract::<common::IrisObjectId>() {
-            vec.push(proto_py_any::Data::ObjectId(x.id));
+            vec.push(proto_py_any::Data::ObjectId(NodeObjectRef {
+                    id: x.id,
+                    location: x.location.clone(),
+                }));
+            if x.location != current_location {
+                fetch_list.push(NodeObjectRef {
+                    id: x.id,
+                    location: x.location.clone(),
+                });
+            }
         } else if let Ok(list) = a.cast_as() {
-            vec.push(proto_py_any::Data::List(list_to_proto(list, py, pickle)));
+            vec.push(proto_py_any::Data::List(list_to_proto(
+                list,
+                py,
+                pickle,
+                current_location,
+            )));
         } else if let Ok(tuple) = a.cast_as() {
-            vec.push(proto_py_any::Data::Tuple(tuple_to_proto(tuple, py, pickle)));
+            let (tuple, mut f) = tuple_to_proto(tuple, py, pickle, current_location);
+            fetch_list.append(&mut f);
+            vec.push(proto_py_any::Data::Tuple(tuple));
         } else if let Ok(dict) = a.cast_as() {
-            vec.push(proto_py_any::Data::Dict(dict_to_proto(dict, py, pickle)));
+            let (dict, mut f) = dict_to_proto(dict, py, pickle, current_location);
+            fetch_list.append(&mut f);
+            vec.push(proto_py_any::Data::Dict(dict));
         } else {
             let bytes = serialize(pickle, py, a).unwrap();
             vec.push(proto_py_any::Data::Bytes(bytes));
@@ -681,8 +765,14 @@ fn list_to_proto(arg: &PyList, py: Python<'_>, pickle: &PyObject) -> ProtoPyList
     }
 }
 
-fn dict_to_proto(arg: &PyDict, py: Python<'_>, pickle: &PyObject) -> ProtoPyDict {
+fn dict_to_proto(
+    arg: &PyDict,
+    py: Python<'_>,
+    pickle: &PyObject,
+    current_location: &str,
+) -> (ProtoPyDict, Vec<NodeObjectRef>) {
     let mut vec = HashMap::new();
+    let mut fetch_list = vec![];
     for (key, a) in arg.iter() {
         let key: String = key.extract().unwrap();
         if let Ok(x) = a.extract() {
@@ -715,31 +805,49 @@ fn dict_to_proto(arg: &PyDict, py: Python<'_>, pickle: &PyObject) -> ProtoPyDict
                 },
             );
         } else if let Ok(x) = a.extract::<common::IrisObjectId>() {
+            if x.location != current_location {
+                fetch_list.push(NodeObjectRef {
+                    id: x.id,
+                    location: x.location.clone(),
+                });
+            }
             vec.insert(
                 key,
                 ProtoPyAny {
-                    data: Some(proto_py_any::Data::ObjectId(x.id)),
+                    data: Some(proto_py_any::Data::ObjectId(NodeObjectRef {
+                        id: x.id,
+                        location: x.location.clone(),
+                    })),
                 },
             );
         } else if let Ok(list) = a.cast_as() {
             vec.insert(
                 key,
                 ProtoPyAny {
-                    data: Some(proto_py_any::Data::List(list_to_proto(list, py, pickle))),
+                    data: Some(proto_py_any::Data::List(list_to_proto(
+                        list,
+                        py,
+                        pickle,
+                        current_location,
+                    ))),
                 },
             );
         } else if let Ok(tuple) = a.cast_as() {
+            let (tuple, mut f) = tuple_to_proto(tuple, py, pickle, current_location);
+            fetch_list.append(&mut f);
             vec.insert(
                 key,
                 ProtoPyAny {
-                    data: Some(proto_py_any::Data::Tuple(tuple_to_proto(tuple, py, pickle))),
+                    data: Some(proto_py_any::Data::Tuple(tuple)),
                 },
             );
         } else if let Ok(dict) = a.cast_as() {
+            let (dict, mut f) = dict_to_proto(dict, py, pickle, current_location);
+            fetch_list.append(&mut f);
             vec.insert(
                 key,
                 ProtoPyAny {
-                    data: Some(proto_py_any::Data::Dict(dict_to_proto(dict, py, pickle))),
+                    data: Some(proto_py_any::Data::Dict(dict)),
                 },
             );
         } else {
@@ -752,7 +860,7 @@ fn dict_to_proto(arg: &PyDict, py: Python<'_>, pickle: &PyObject) -> ProtoPyDict
             );
         }
     }
-    ProtoPyDict { map: vec }
+    (ProtoPyDict { map: vec }, fetch_list)
 }
 
 fn serialize<T>(pickle: &PyObject, py: Python<'_>, err: T) -> PyResult<Vec<u8>>
@@ -765,8 +873,11 @@ where
     Ok(bytes)
 }
 
-fn tuple_to_obj(py: Python<'_>, tuple: &ProtoPyTuple, src: &IrisObjectInternal) -> PyResult<PyObject>
-{
+fn tuple_to_obj(
+    py: Python<'_>,
+    tuple: &ProtoPyTuple,
+    src: &IrisObjectInternal,
+) -> PyResult<PyObject> {
     let mut vec = vec![];
     for t in &tuple.items {
         match &t.data {
@@ -782,23 +893,20 @@ fn tuple_to_obj(py: Python<'_>, tuple: &ProtoPyTuple, src: &IrisObjectInternal) 
             Some(proto_py_any::Data::Str(x)) => {
                 vec.push(x.to_object(py));
             }
-            Some(proto_py_any::Data::ObjectId(id)) => {
-                vec.push(
-                    IrisObjectInternal {
-                        inner: Arc::new(
-                            GuardedIrisObject {
-                                runtime_handle: src.inner.runtime_handle.clone(),
-                                client: src.inner.client.clone(),
-                                node_ref: NodeObject {
-                                    id: *id,
-                                    ..Default::default()
-                                },
-                                time_cost: Duration::default(),
-                            }
-                        )
-                    }.into_py(py)
-                )
-            }
+            Some(proto_py_any::Data::ObjectId(id)) => vec.push(
+                IrisObjectInternal {
+                    inner: Arc::new(GuardedIrisObject {
+                        runtime_handle: src.inner.runtime_handle.clone(),
+                        client: src.inner.client.clone(),
+                        node_ref: NodeObject {
+                            id: id.id,
+                            ..Default::default()
+                        },
+                        time_cost: Duration::default(),
+                    }),
+                }
+                .into_py(py),
+            ),
             Some(proto_py_any::Data::Tuple(tuple)) => {
                 println!("find tuple");
                 vec.push(tuple_to_obj(py, &tuple, src).unwrap());

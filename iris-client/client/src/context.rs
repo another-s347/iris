@@ -55,7 +55,7 @@ impl IrisContextInternal {
         }
     }
 
-    fn connect(&mut self, py:Python<'_>, address: String) -> PyResult<crate::IrisClientInternal> {
+    fn connect(&mut self, py:Python<'_>, address: String, node:String) -> PyResult<crate::IrisClientInternal> {
         let handle = self.runtime
             .spawn(_connect(address));
         let client = py.allow_threads(|| {
@@ -64,7 +64,8 @@ impl IrisContextInternal {
         Ok(crate::IrisClientInternal {
             runtime_handle: self.runtime.handle().clone(),
             client: client.unwrap(),
-            async_tasks: Default::default()
+            async_tasks: Default::default(),
+            node
         })
     }
 

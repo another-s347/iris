@@ -6,44 +6,19 @@ use pyo3::type_object::PyTypeInfo;
 #[derive(Clone)]
 pub struct IrisObjectId {
     #[pyo3(get)]
-    pub id: u64
+    pub id: u64,
+    #[pyo3(get)]
+    pub location: String
 }
 
 #[pymethods]
 impl IrisObjectId {
     #[new]
-    pub fn new(id:Option<u64>) -> IrisObjectId {
+    pub fn new(id:u64, location:String) -> IrisObjectId {
         IrisObjectId {
-            id: id.unwrap_or(0)
+            id: id,
+            location: location
         }
-    }
-
-    pub fn __setstate__(&mut self, py: Python, state: PyObject) -> PyResult<()> {
-        match state.extract::<&PyInt>(py) {
-            Ok(s) => {
-                self.id = s.extract().unwrap();
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn __getstate__(&self, py: Python) -> PyResult<PyObject> {
-        Ok(self.id.into_py(py))
-        // Ok(PyInt::new(py, &serialize(&self.foo).unwrap()).to_object(py))
-    }
-}
-
-impl IrisObjectId {
-    pub unsafe fn unsound_extract(x: &PyAny) -> Option<Self> {
-        if x.get_type().name() != "client.IrisObjectId" {
-            return None;
-        }
-        println!("{}, {}", Self::is_instance(x), x.get_type().name());
-        let cell: &PyCell<IrisObjectId> = unsafe { PyTryFrom::try_from_unchecked(x) };
-        let y = cell.try_borrow().ok()?.clone();
-        std::mem::forget(cell);
-        Some(y)
     }
 }
 
