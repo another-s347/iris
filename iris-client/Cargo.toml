@@ -4,5 +4,8 @@ members = [
     "server",
     "common",
     "client",
-    "proto"
+    "proto",
 ]
+
+[profile.release]
+debug = true

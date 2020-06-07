@@ -132,14 +132,12 @@ impl IrisObjectInternal {
         py: Python<'_>,
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
-        recursive: Option<bool>,
         attr: Option<String>,
         pickle: &PyAny,
     ) -> Option<IrisObjectInternal> {
         let arg = new_arg_request(
             b_args,
             b_kwargs,
-            recursive,
             py,
             &pickle.to_object(py),
             self.inner.node_ref.location.as_str(),
@@ -433,13 +431,11 @@ impl IrisClientInternal {
         func: Vec<u8>,
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
-        recursive: Option<bool>,
         pickle: &PyAny,
     ) -> IrisObjectInternal {
         let arg = new_arg_request(
             b_args,
             b_kwargs,
-            recursive,
             py,
             &pickle.to_object(py),
             self.node.as_str(),
@@ -492,13 +488,11 @@ impl IrisClientInternal {
         qualname: &str,
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
-        recursive: Option<bool>,
         pickle: &PyAny,
     ) -> PyResult<IrisObjectInternal> {
         let arg = new_arg_request(
             b_args,
             b_kwargs,
-            recursive,
             py,
             &pickle.to_object(py),
             self.node.as_str(),
@@ -537,7 +531,6 @@ impl IrisClientInternal {
         attr: Option<String>,
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
-        recursive: Option<bool>,
         torch_func: Option<&str>,
         to_here: bool,
         pickle: &PyAny,
@@ -545,7 +538,6 @@ impl IrisClientInternal {
         let arg = new_arg_request(
             b_args,
             b_kwargs,
-            recursive,
             py,
             &pickle.to_object(py),
             self.node.as_str(),
@@ -569,7 +561,6 @@ impl IrisClientInternal {
         attr: Option<String>,
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
-        recursive: Option<bool>,
         torch_func: Option<&str>,
         to_here: bool,
         pickle: &PyAny,
@@ -577,7 +568,6 @@ impl IrisClientInternal {
         let arg = new_arg_request(
             b_args,
             b_kwargs,
-            recursive,
             py,
             &pickle.to_object(py),
             self.node.as_str(),
@@ -692,7 +682,6 @@ fn client(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
 fn new_arg_request(
     b_args: Option<&PyTuple>,
     b_kwargs: Option<&PyDict>,
-    recursive: Option<bool>,
     py: Python<'_>,
     pickle: &PyObject,
     current_location: &str,

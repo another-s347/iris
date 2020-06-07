@@ -35,7 +35,9 @@ use tonic::{
 use uuid;
 
 pub mod distributed;
+pub mod utils;
 
+use utils::*;
 #[derive(Debug, Clone)]
 struct IrisServer {
     modules: Arc<DashMap<String, Py<PyModule>>>,
@@ -173,246 +175,6 @@ impl IrisServer {
     }
 }
 
-pub fn dumps<T>(pickle: &PyObject, py: Python<'_>, err: T) -> PyResult<Vec<u8>>
-where
-    T: IntoPy<PyObject>,
-{
-    let result = pickle.call_method1(py, "dumps", (err,))?;
-    let bytes: &PyBytes = result.cast_as(py)?;
-    let bytes = bytes.as_bytes().to_vec();
-    Ok(bytes)
-}
-
-fn loads(pickle: &PyObject, py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject>
-// where T:AsPyPointer + PyNativeType + PyTypeInfo
-{
-    if bytes.len() == 0 {
-        return Ok(py.None());
-    }
-    // let pickle = self.pickle.to_object(py);
-    let result = pickle.call_method1(py, "loads", (bytes,))?;
-    Ok(result)
-    // let result:&T = result.cast_as(py)?;
-    // Ok(Py::from(result))
-}
-
-fn map_result(
-    pickle: &PyObject,
-    py: Python<'_>,
-    result: PyResult<NodeObject>,
-    current_node: &str,
-) -> NodeObject {
-    match result {
-        Ok(r) => r,
-        Err(e) => {
-            let err = dumps(pickle, py, e).unwrap();
-            NodeObject {
-                exception: err,
-                location: current_node.to_owned(),
-                ..Default::default()
-            }
-        }
-    }
-}
-
-fn map_kwargs_to_local<'a>(
-    object_map: &DashMap<u64, Py<PyAny>>,
-    py: Python<'a>,
-    args: Option<ProtoPyDict>,
-    recursive: &PyObject,
-) -> Option<PyObject> {
-    let tuple = args;
-    // let maps = object_map.lock().unwrap();
-
-    if let Some(tuple) = tuple {
-        Some(map_kwargs_to_local_impl(&object_map, py, tuple, recursive))
-    } else {
-        None
-    }
-}
-
-fn map_args_to_local<'a>(
-    object_map: &DashMap<u64, Py<PyAny>>,
-    py: Python<'a>,
-    args: Option<ProtoPyTuple>,
-    recursive: &PyObject,
-) -> PyObject {
-    let tuple = args;
-    // let maps = object_map.lock().unwrap();
-
-    if let Some(tuple) = tuple {
-        map_args_to_local_impl(&object_map, py, tuple, recursive)
-    } else {
-        PyTuple::empty(py).to_object(py)
-    }
-}
-
-fn map_kwargs_to_local_impl<'a>(
-    maps: &DashMap<u64, Py<PyAny>>,
-    py: Python<'a>,
-    args: ProtoPyDict,
-    recursive: &PyObject,
-) -> PyObject {
-    let mut tuple_args = vec![];
-    for (key, x) in args.map {
-        match x.data {
-            Some(proto_py_any::Data::I32(x)) => {
-                tuple_args.push((key, x.to_object(py)));
-            }
-            Some(proto_py_any::Data::I64(x)) => {
-                tuple_args.push((key, x.to_object(py)));
-            }
-            Some(proto_py_any::Data::Boolean(b)) => {
-                tuple_args.push((key, b.to_object(py)));
-            }
-            Some(proto_py_any::Data::Bytes(bytes)) => {
-                let o = loads(recursive, py, bytes.as_ref()).unwrap();
-                tuple_args.push((key, o));
-            }
-            Some(proto_py_any::Data::Dict(dict)) => {
-                tuple_args.push((key, map_kwargs_to_local_impl(maps, py, dict, recursive)));
-            }
-            Some(proto_py_any::Data::F32(f)) => {
-                tuple_args.push((key, f.to_object(py)));
-            }
-            Some(proto_py_any::Data::U32(x)) => {
-                tuple_args.push((key, x.to_object(py)));
-            }
-            Some(proto_py_any::Data::U64(x)) => {
-                tuple_args.push((key, x.to_object(py)));
-            }
-            Some(proto_py_any::Data::Str(s)) => {
-                tuple_args.push((key, s.to_object(py)));
-            }
-            Some(proto_py_any::Data::ObjectId(id)) => {
-                let o = maps.get(&id.id).unwrap().to_object(py);
-                tuple_args.push((key, o));
-            }
-            Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push((key, map_list_to_local_impl(maps, py, list, recursive)));
-            }
-            Some(proto_py_any::Data::Tuple(tuple)) => {
-                tuple_args.push((key, map_args_to_local_impl(maps, py, tuple, recursive)));
-            }
-            None => {}
-        }
-    }
-
-    tuple_args.into_py_dict(py).to_object(py)
-}
-
-fn map_list_to_local_impl<'a>(
-    maps: &DashMap<u64, Py<PyAny>>,
-    py: Python<'a>,
-    args: ProtoPyList,
-    recursive: &PyObject,
-) -> PyObject {
-    let mut tuple_args: Vec<PyObject> = vec![];
-    // py.run("print(args)", Some(vec![("args", args)].into_py_dict(py)), None).unwrap();
-    for x in args.items {
-        match x.data {
-            Some(proto_py_any::Data::I32(x)) => {
-                let object = x.to_object(py);
-                tuple_args.push(object);
-            }
-            Some(proto_py_any::Data::I64(x)) => {
-                tuple_args.push(x.to_object(py));
-            }
-            Some(proto_py_any::Data::Boolean(b)) => {
-                tuple_args.push(b.to_object(py));
-            }
-            Some(proto_py_any::Data::Bytes(bytes)) => {
-                let o = loads(recursive, py, bytes.as_ref()).unwrap();
-                tuple_args.push(o);
-            }
-            Some(proto_py_any::Data::Dict(dict)) => {
-                tuple_args.push(map_kwargs_to_local_impl(maps, py, dict, recursive));
-            }
-            Some(proto_py_any::Data::F32(f)) => {
-                tuple_args.push(f.to_object(py));
-            }
-            Some(proto_py_any::Data::U32(x)) => {
-                tuple_args.push(x.to_object(py));
-            }
-            Some(proto_py_any::Data::U64(x)) => {
-                tuple_args.push(x.to_object(py));
-            }
-            Some(proto_py_any::Data::Str(s)) => {
-                tuple_args.push(s.to_object(py));
-            }
-            Some(proto_py_any::Data::ObjectId(id)) => {
-                let o = maps.get(&id.id).unwrap();
-                let o = o.to_object(py);
-                tuple_args.push(o);
-            }
-            Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push(map_list_to_local_impl(maps, py, list, recursive))
-            }
-            Some(proto_py_any::Data::Tuple(tuple)) => {
-                tuple_args.push(map_args_to_local_impl(maps, py, tuple, recursive));
-            }
-            None => {}
-        }
-    }
-
-    PyList::new(py, tuple_args.iter().map(|x| x.as_ref(py))).to_object(py)
-}
-fn map_args_to_local_impl<'a>(
-    maps: &DashMap<u64, Py<PyAny>>,
-    py: Python<'a>,
-    args: ProtoPyTuple,
-    recursive: &PyObject,
-) -> PyObject {
-    let mut tuple_args: Vec<PyObject> = vec![];
-    // py.run("print(args)", Some(vec![("args", args)].into_py_dict(py)), None).unwrap();
-    for x in args.items {
-        match x.data {
-            Some(proto_py_any::Data::I32(x)) => {
-                let object = x.to_object(py);
-                tuple_args.push(object);
-            }
-            Some(proto_py_any::Data::I64(x)) => {
-                tuple_args.push(x.to_object(py));
-            }
-            Some(proto_py_any::Data::Boolean(b)) => {
-                tuple_args.push(b.to_object(py));
-            }
-            Some(proto_py_any::Data::Bytes(bytes)) => {
-                let o = loads(recursive, py, bytes.as_ref()).unwrap();
-                tuple_args.push(o);
-            }
-            Some(proto_py_any::Data::Dict(dict)) => {
-                tuple_args.push(map_kwargs_to_local_impl(maps, py, dict, recursive));
-            }
-            Some(proto_py_any::Data::F32(f)) => {
-                tuple_args.push(f.to_object(py));
-            }
-            Some(proto_py_any::Data::U32(x)) => {
-                tuple_args.push(x.to_object(py));
-            }
-            Some(proto_py_any::Data::U64(x)) => {
-                tuple_args.push(x.to_object(py));
-            }
-            Some(proto_py_any::Data::Str(s)) => {
-                tuple_args.push(s.to_object(py));
-            }
-            Some(proto_py_any::Data::ObjectId(id)) => {
-                let o = maps.get(&id.id).expect(&format!("id {}", id.id));
-                let o = o.to_object(py);
-                tuple_args.push(o);
-            }
-            Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push(map_list_to_local_impl(maps, py, list, recursive))
-            }
-            Some(proto_py_any::Data::Tuple(tuple)) => {
-                tuple_args.push(map_args_to_local_impl(maps, py, tuple, recursive));
-            }
-            None => {}
-        }
-    }
-
-    PyTuple::new(py, tuple_args.iter().map(|x| x.as_ref(py))).to_object(py)
-}
 
 fn _call(
     object_map: Arc<DashMap<u64, Py<PyAny>>>,
@@ -580,7 +342,6 @@ fn create_object(
 
 fn apply(
     object_map: Arc<DashMap<u64, Py<PyAny>>>,
-    modules: Arc<DashMap<String, Py<PyModule>>>,
     py: Python<'_>,
     request: ApplyRequest,
     pickle: &PyObject,
@@ -672,21 +433,30 @@ impl Greeter for IrisServer {
         let start = std::time::Instant::now();
         let request: CallRequest = request.into_inner();
         let fetch_list = if let Some(arg) = &request.arg {
-            self.fetch_remote(&arg.fetch_lists).await
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                self.fetch_remote(&arg.fetch_lists),
+            )
+            .await
+            .unwrap()
         } else {
             Default::default()
         };
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
         let name = self.current_node.clone();
-        let call_task = task::spawn_blocking(move || {
-            let gil = Python::acquire_gil();
-            let py = gil.python();
-            let pickle = pickle.to_object(py);
-            let result = _call(object_map, py, request, &pickle, name.as_str());
-            map_result(&pickle, py, result, name.as_str())
-        })
+        let call_task = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            task::spawn_blocking(move || {
+                let gil = Python::acquire_gil();
+                let py = gil.python();
+                let pickle = pickle.to_object(py);
+                let result = _call(object_map, py, request, &pickle, name.as_str());
+                map_result(&pickle, py, result, name.as_str())
+            }),
+        )
         .await
+        .unwrap()
         .unwrap();
         let end = std::time::Instant::now();
         let d: std::time::Duration = end - start;
@@ -705,7 +475,12 @@ impl Greeter for IrisServer {
         let start = std::time::Instant::now();
         let request = request.into_inner();
         let fetch_list = if let Some(arg) = &request.arg {
-            self.fetch_remote(&arg.fetch_lists).await
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                self.fetch_remote(&arg.fetch_lists),
+            )
+            .await
+            .unwrap()
         } else {
             Default::default()
         };
@@ -713,14 +488,19 @@ impl Greeter for IrisServer {
         let pickle = self.pickle.clone();
         let modules = self.modules.clone();
         let name = self.current_node.clone();
-        let result = task::spawn_blocking(move || {
-            let gil = Python::acquire_gil();
-            let py = gil.python();
-            let pickle = pickle.to_object(py);
-            let result = create_object(object_map, modules, py, request, &pickle, name.as_str());
-            map_result(&pickle, py, result, name.as_str())
-        })
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            task::spawn_blocking(move || {
+                let gil = Python::acquire_gil();
+                let py = gil.python();
+                let pickle = pickle.to_object(py);
+                let result =
+                    create_object(object_map, modules, py, request, &pickle, name.as_str());
+                map_result(&pickle, py, result, name.as_str())
+            }),
+        )
         .await
+        .unwrap()
         .unwrap();
         let end = std::time::Instant::now();
         let d: std::time::Duration = end - start;
@@ -739,7 +519,12 @@ impl Greeter for IrisServer {
         let start = std::time::Instant::now();
         let request = request.into_inner();
         let fetch_list = if let Some(arg) = &request.arg {
-            self.fetch_remote(&arg.fetch_lists).await
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                self.fetch_remote(&arg.fetch_lists),
+            )
+            .await
+            .unwrap()
         } else {
             Default::default()
         };
@@ -747,14 +532,18 @@ impl Greeter for IrisServer {
         let pickle = self.pickle.clone();
         let modules = self.modules.clone();
         let name = self.current_node.clone();
-        let result = task::spawn_blocking(move || {
-            let gil = Python::acquire_gil();
-            let py = gil.python();
-            let pickle = pickle.to_object(py);
-            let result = apply(object_map, modules, py, request, &pickle, name.as_str());
-            map_result(&pickle, py, result, name.as_str())
-        })
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            task::spawn_blocking(move || {
+                let gil = Python::acquire_gil();
+                let py = gil.python();
+                let pickle = pickle.to_object(py);
+                let result = apply(object_map, py, request, &pickle, name.as_str());
+                map_result(&pickle, py, result, name.as_str())
+            }),
+        )
         .await
+        .unwrap()
         .unwrap();
         let end = std::time::Instant::now();
         let d: std::time::Duration = end - start;
@@ -773,7 +562,12 @@ impl Greeter for IrisServer {
         let request = request.into_inner();
         let id = request.id;
         let request = vec![request];
-        let result: HashMap<u64, u64> = self.fetch_remote(&request).await;
+        let result: HashMap<u64, u64> = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.fetch_remote(&request),
+        )
+        .await
+        .unwrap();
         let id = *result.get(&id).unwrap();
         return Ok(Response::new(NodeObject {
             id,
@@ -795,20 +589,31 @@ impl Greeter for IrisServer {
     ) -> Result<Response<NodeObject>, Status> {
         let start = std::time::Instant::now();
         let request = request.into_inner();
-        let gil = Python::acquire_gil();
-        let py = gil.python();
+        let maps = self.objects.clone();
+        let id = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || {
+                let gil = Python::acquire_gil();
+                let py = gil.python();
 
-        let mut hasher = DefaultHasher::new();
-        let id = uuid::Uuid::new_v4();
-        id.hash(&mut hasher);
-        let id = hasher.finish();
+                let mut hasher = DefaultHasher::new();
+                let id = uuid::Uuid::new_v4();
+                id.hash(&mut hasher);
+                let id = hasher.finish();
 
-        let mut maps = &self.objects; //.lock().unwrap();
-        let obj = maps.get(&request.object_id).unwrap();
-        let obj = obj.to_object(py);
-        let obj = obj.as_ref(py);
-        let obj = dbg_py(py, obj.getattr(request.attr.as_str())).expect(request.attr.as_str());
-        maps.insert(id, Py::from(obj));
+                // let mut maps = &self.objects; //.lock().unwrap();
+                let obj = { maps.get(&request.object_id).unwrap().value().clone() };
+                let obj = obj.to_object(py);
+                let obj = obj.as_ref(py);
+                let obj =
+                    dbg_py(py, obj.getattr(request.attr.as_str())).expect(request.attr.as_str());
+                maps.insert(id, Py::from(obj));
+                id
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         let end = std::time::Instant::now();
         let d: std::time::Duration = end - start;
@@ -856,13 +661,20 @@ impl Greeter for IrisServer {
         request: Request<GetParameterRequest>,
     ) -> Result<Response<Value>, Status> {
         let request = request.into_inner();
-        let gil = Python::acquire_gil();
-        let py = gil.python();
+        let maps = self.objects.clone();
+        let pickle = self.pickle.clone();
+        let data = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move|| {
+                let gil = Python::acquire_gil();
+                let py = gil.python();
+                let pickle = pickle.to_object(py);
+                // let maps = &self.objects; //.lock().unwrap();
+                let obj = {maps.get(&request.object_id).unwrap().value().clone()};
 
-        let maps = &self.objects; //.lock().unwrap();
-        let obj = maps.get(&request.object_id).unwrap();
-
-        let data = self.serialize(py, obj.to_object(py)).unwrap();
+                dumps(&pickle,py, obj.to_object(py)).unwrap()
+            }),
+        ).await.unwrap().unwrap();
         return Ok(Response::new(Value { data }));
     }
 }
@@ -948,15 +760,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rx.recv().map(|_| ()),
         );
 
-    let server_n2n = Server::builder()
-        .concurrency_limit_per_connection(4096)
-        .add_service(proto::n2n::n2n_server::N2nServer::new(distributed_server))
-        .serve_with_shutdown(
-            SocketAddr::new(opt.address.parse().unwrap(), opt.port),
-            rx2.recv().map(|_| ()),
-        );
+    let t2 = tokio::spawn(async move {
+        let server_n2n = Server::builder()
+            .concurrency_limit_per_connection(4096)
+            .add_service(proto::n2n::n2n_server::N2nServer::new(distributed_server))
+            .serve_with_shutdown(
+                SocketAddr::new(opt.address.parse().unwrap(), opt.port),
+                rx2.recv().map(|_| ()),
+            );
+        server_n2n.await
+    });
 
-    let (r1, r2) = tokio::join!(server_iris, server_n2n);
+    let (r1, r2) = tokio::join!(server_iris, t2);
 
     tokio::fs::remove_file(Path::new(&path)).await?;
 
