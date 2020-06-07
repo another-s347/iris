@@ -26,14 +26,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::distributed;
+use crate::utils::*;
 use tokio::{net::UnixListener, task};
 use tonic::{
     transport::{Server, Uri},
     Request, Response, Status,
 };
 use uuid;
-use crate::distributed;
-use crate::utils::*;
 #[derive(Debug, Clone)]
 pub struct IrisServer {
     pub modules: Arc<DashMap<String, Py<PyModule>>>,
@@ -43,7 +43,6 @@ pub struct IrisServer {
     pub profile: Arc<dashmap::DashMap<&'static str, (usize, std::time::Duration)>>,
     pub current_node: Arc<String>,
 }
-
 
 impl IrisServer {
     fn import_modules(
@@ -85,7 +84,11 @@ impl IrisServer {
             let recv_start = std::time::Instant::now();
             let mut node = node.clone();
             let data = node
-                .get_object(tonic::Request::new(n2n::ObjectId { id: o.id }))
+                .get_object(tonic::Request::new(n2n::NodeObjectRef {
+                    id: o.id,
+                    attr: o.attr.clone(),
+                    location: o.location.clone(),
+                }))
                 .await
                 .unwrap()
                 .into_inner();
@@ -121,8 +124,12 @@ impl IrisServer {
             }
             let tasks = nodes.iter_mut().map(|(node, o)| {
                 let obj = o.clone();
-                node.get_object(tonic::Request::new(n2n::ObjectId { id: o.id }))
-                    .map(move |x| (x.unwrap().into_inner(), obj))
+                node.get_object(tonic::Request::new(n2n::NodeObjectRef {
+                    id: o.id,
+                    attr: o.attr.clone(),
+                    location: o.location.clone(),
+                }))
+                .map(move |x| (x.unwrap().into_inner(), obj))
             });
             let result: Vec<(n2n::Value, NodeObjectRef)> = futures::future::join_all(tasks).await;
             let map = self.objects.clone();
@@ -153,7 +160,6 @@ impl IrisServer {
     }
 }
 
-
 fn _call(
     object_map: Arc<DashMap<u64, Py<PyAny>>>,
     py: Python<'_>,
@@ -172,8 +178,8 @@ fn _call(
     };
     let o = maps.get(&request.object_id).unwrap().clone();
     let mut o: &PyAny = o.as_ref(py);
-    if !request.attr.is_empty() {
-        o = dbg_py(py, o.getattr(&request.attr)).unwrap();
+    for attr in request.attr {
+        o = dbg_py(py, o.getattr(attr)).unwrap();
     }
     let ret = if let Some(k) = kwargs {
         o.call(args.cast_as(py)?, Some(k.cast_as(py)?))?
@@ -249,6 +255,7 @@ fn try_extract_native_value(
                 vec.push(proto_py_any::Data::ObjectId(NodeObjectRef {
                     id,
                     location: current_node.to_owned(),
+                    attr: Default::default(),
                 }));
             }
         }
@@ -577,9 +584,10 @@ impl Greeter for IrisServer {
                 // let mut maps = &self.objects; //.lock().unwrap();
                 let obj = { maps.get(&request.object_id).unwrap().value().clone() };
                 let obj = obj.to_object(py);
-                let obj = obj.as_ref(py);
-                let obj =
-                    dbg_py(py, obj.getattr(request.attr.as_str())).expect(request.attr.as_str());
+                let mut obj = obj.as_ref(py);
+                for attr in request.attr {
+                    obj = dbg_py(py, obj.getattr(attr.as_str())).expect(attr.as_str());
+                }
                 maps.insert(id, Py::from(obj));
                 id
             }),
@@ -607,7 +615,7 @@ impl Greeter for IrisServer {
         let start = std::time::Instant::now();
         let request = request.into_inner();
 
-        let mut maps = &self.objects; //.lock().unwrap();
+        let mut maps = &self.objects;
         maps.remove(&request.id);
 
         let end = std::time::Instant::now();
@@ -617,25 +625,28 @@ impl Greeter for IrisServer {
         return Ok(Response::new(request));
     }
 
-    async fn get_value(
-        &self,
-        request: Request<NodeObjectRef>,
-    ) -> Result<Response<Value>, Status> {
+    async fn get_value(&self, request: Request<NodeObjectRef>) -> Result<Response<Value>, Status> {
         let request = request.into_inner();
         let maps = self.objects.clone();
         let pickle = self.pickle.clone();
         let data = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            tokio::task::spawn_blocking(move|| {
+            tokio::task::spawn_blocking(move || {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
                 // let maps = &self.objects; //.lock().unwrap();
-                let obj = {maps.get(&request.id).unwrap().value().clone()};
+                let mut obj = { maps.get(&request.id).unwrap().value().clone() }.to_object(py);
+                for attr in request.attr {
+                    obj = obj.getattr(py, attr).unwrap();
+                }
 
-                dumps(&pickle,py, obj.to_object(py)).unwrap()
+                dumps(&pickle, py, obj).unwrap()
             }),
-        ).await.unwrap().unwrap();
+        )
+        .await
+        .unwrap()
+        .unwrap();
         return Ok(Response::new(Value { data }));
     }
 }

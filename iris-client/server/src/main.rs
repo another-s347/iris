@@ -86,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let distributed_server = distributed::NodeServer {
         pickle: pickle.clone(),
         objects: objects.clone(),
+        current_node: format!("node{}:{}", opt.address, opt.port)
     };
 
     let greeter = command_server::IrisServer {

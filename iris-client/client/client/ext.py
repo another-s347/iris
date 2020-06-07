@@ -35,7 +35,7 @@ class IrisContext:
         return inner_client.create_object(module,  *args, **kwargs)
 
 class IrisObject:
-    def __init__(self, inner, node, ctx, args, kwargs):
+    def __init__(self, inner, node, ctx, args, kwargs, attrs=[]):
         super().__init__()
         self.inner = inner
         self.node = node
@@ -45,6 +45,7 @@ class IrisObject:
         self.type = inner.get_type()
         self.args = args
         self.kwargs = kwargs
+        self.attrs = attrs
 
     def __repr__(self):
         return f"Remote Object #{self.inner.id().id} on {self.node}, Type {self.type}"
@@ -56,7 +57,7 @@ class IrisObject:
     def get(self):
         if self.value:
             return self.value
-        data = self.inner.get_value()
+        data = self.inner.get_value(self.attrs)
         return dill.loads(data)
 
     def __call__(self, *args, **kwargs):
@@ -66,7 +67,8 @@ class IrisObject:
         r = self.inner.call(
             b_args=r_args,
             b_kwargs=kwargs,
-            pickle=dill
+            pickle=dill,
+            attr=self.attrs,
         )
         if r.exception():
             exception = dill.loads(r.exception())
@@ -82,7 +84,7 @@ class IrisObject:
         r = self.inner.call(
             b_args=r_args,
             b_kwargs=kwargs,
-            attr=attr, pickle=dill
+            attr=[*self.attrs,attr], pickle=dill
         )
         if r.exception():
             exception = dill.loads(r.exception())
@@ -96,11 +98,15 @@ class IrisObject:
         return self.ctx.client_wrapper[node].get_remote_object(self)
 
     def __getattr__(self, attr):
-        r = self.inner.get_attr(attr)
-        if r.exception():
-            exception = dill.loads(r.exception())
-            raise exception
-        return IrisObject(r, self.node, self.ctx, None, None)
+        # TODO: add options
+        if False:
+            r = self.inner.get_attr([attr])
+            if r.exception():
+                exception = dill.loads(r.exception())
+                raise exception
+            return IrisObject(r, self.node, self.ctx, None, None)
+        else:
+            return IrisObject(self.inner, self.node, self.ctx, None, None, [*self.attrs, attr])
 
     def __add__(self, other):
         return self._call_with_attr('__add__', args=(other,))
@@ -296,7 +302,7 @@ def retrieve_args(self, node, ctx, args, cls=tuple):
     holds_ref = []
     for arg in args:
         if type(arg) is IrisObject:
-            a.append(arg.id)
+            a.append(arg.id.add_attr(self.attrs))
         elif type(arg) is list:
             rr = retrieve_args(self, node, ctx, a,  list)
             holds_ref.extend(rr[1])

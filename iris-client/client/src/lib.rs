@@ -85,6 +85,7 @@ impl GuardedIrisObject {
         IrisObjectId {
             id: self.node_ref.id,
             location: self.node_ref.location.clone(),
+            attr: vec![],
         }
     }
 
@@ -111,7 +112,8 @@ impl Drop for GuardedIrisObject {
     fn drop(&mut self) {
         let request = NodeObjectRef {
             id: self.node_ref.id,
-            location: Default::default()
+            attr: vec![],
+            location: Default::default(),
         };
         // println!("drop object {}, type {}", self.node_ref.id, self.node_ref.r#type);
         self._del(request)
@@ -120,10 +122,11 @@ impl Drop for GuardedIrisObject {
 
 #[pymethods]
 impl IrisObjectInternal {
-    fn get_value<'p>(&mut self, py: Python<'p>) -> Option<&'p PyBytes> {
+    fn get_value<'p>(&mut self, py: Python<'p>, attrs: Vec<String>) -> Option<&'p PyBytes> {
         let request = NodeObjectRef {
             id: self.inner.node_ref.id,
-            location: Default::default()
+            location: Default::default(),
+            attr: attrs,
         };
         let data = py.allow_threads(|| self._get_value(request));
         return data.map(|x| PyBytes::new(py, x.as_ref()));
@@ -134,7 +137,7 @@ impl IrisObjectInternal {
         py: Python<'_>,
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
-        attr: Option<String>,
+        attr: Option<Vec<String>>,
         pickle: &PyAny,
     ) -> Option<IrisObjectInternal> {
         let arg = new_arg_request(
@@ -148,7 +151,7 @@ impl IrisObjectInternal {
         py.allow_threads(|| self._call(arg, attr))
     }
 
-    fn get_attr(&mut self, py: Python<'_>, attr: String) -> Option<IrisObjectInternal> {
+    fn get_attr(&mut self, py: Python<'_>, attr: Vec<String>) -> Option<IrisObjectInternal> {
         let request = GetAttrRequest {
             attr,
             object_id: self.inner.node_ref.id,
@@ -222,7 +225,11 @@ impl IrisObjectInternal {
         Some(ret.data)
     }
 
-    fn _call(&mut self, arg: Option<CallArgs>, attr: Option<String>) -> Option<IrisObjectInternal> {
+    fn _call(
+        &mut self,
+        arg: Option<CallArgs>,
+        attr: Option<Vec<String>>,
+    ) -> Option<IrisObjectInternal> {
         let start = Instant::now();
         let mut client = self.inner.client.clone();
         let task_handle = self
@@ -293,8 +300,6 @@ impl IrisClientInternal {
             .unwrap();
     }
 
-
-
     // fn _torch_call_async(
     //     &mut self,
     //     request: TorchRpcCallRequest,
@@ -316,7 +321,6 @@ impl IrisClientInternal {
     //     // });
     //     // task_handle
     // }
-
 
     fn _apply(&mut self, request: ApplyRequest) -> IrisObjectInternal {
         let start = Instant::now();
@@ -393,18 +397,26 @@ impl IrisClientInternal {
         py.allow_threads(|| self._apply(request))
     }
 
-
-    fn get_remote_object(&mut self, py: Python<'_>, obj: &IrisObjectInternal) -> IrisObjectInternal {
+    fn get_remote_object(
+        &mut self,
+        py: Python<'_>,
+        obj: &IrisObjectInternal,
+        attr: Option<Vec<String>>,
+    ) -> IrisObjectInternal {
         let start = std::time::Instant::now();
         let id = obj.inner.id();
         let request = NodeObjectRef {
             id: id.id,
             location: id.location,
+            attr: attr.unwrap_or_default(),
         };
-        let node_ref = py.allow_threads(|| {
-            self.runtime_handle
-                .block_on(self.client.get_remote_object(tonic::Request::new(request)))
-        }).unwrap().into_inner();
+        let node_ref = py
+            .allow_threads(|| {
+                self.runtime_handle
+                    .block_on(self.client.get_remote_object(tonic::Request::new(request)))
+            })
+            .unwrap()
+            .into_inner();
         IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),
@@ -647,11 +659,13 @@ fn tuple_to_proto(
                 fetch_list.push(NodeObjectRef {
                     id: x.id,
                     location: x.location.clone(),
+                    attr: x.attr.clone(),
                 });
             }
             vec.push(proto_py_any::Data::ObjectId(NodeObjectRef {
                 id: x.id,
                 location: x.location.clone(),
+                attr: x.attr,
             }));
         } else if let Ok(list) = a.cast_as() {
             vec.push(proto_py_any::Data::List(list_to_proto(
@@ -705,11 +719,13 @@ fn list_to_proto(
             vec.push(proto_py_any::Data::ObjectId(NodeObjectRef {
                 id: x.id,
                 location: x.location.clone(),
+                attr: x.attr.clone(),
             }));
             if x.location != current_location {
                 fetch_list.push(NodeObjectRef {
                     id: x.id,
                     location: x.location.clone(),
+                    attr: x.attr,
                 });
             }
         } else if let Ok(list) = a.cast_as() {
@@ -784,6 +800,7 @@ fn dict_to_proto(
                 fetch_list.push(NodeObjectRef {
                     id: x.id,
                     location: x.location.clone(),
+                    attr: x.attr.clone(),
                 });
             }
             vec.insert(
@@ -792,6 +809,7 @@ fn dict_to_proto(
                     data: Some(proto_py_any::Data::ObjectId(NodeObjectRef {
                         id: x.id,
                         location: x.location.clone(),
+                        attr: x.attr,
                     })),
                 },
             );
@@ -884,7 +902,6 @@ fn tuple_to_obj(
                 .into_py(py),
             ),
             Some(proto_py_any::Data::Tuple(tuple)) => {
-                println!("find tuple");
                 vec.push(tuple_to_obj(py, &tuple, src).unwrap());
             }
             _ => unreachable!(),
