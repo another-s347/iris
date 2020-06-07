@@ -1,23 +1,10 @@
 from .client import IrisContextInternal, IrisObjectId
 import dill
 import sys
-import dill
 import functools
-import torch.distributed.autograd as dist_autograd
 from torch import optim
-from torch.distributed.optim import DistributedOptimizer
-# from proto.helloworld.helloworld_pb2 import *
 import asyncio
 import traceback
-
-# class ObjectId:
-#     def __init__(self, id):
-#         super().__init__()
-#         self.id = id
-
-#     def __int__(self):
-#         return self.id
-
 
 class IrisContext:
     def __init__(self):
@@ -46,98 +33,6 @@ class IrisContext:
     def create_object(self, node, module,  *args, **kwargs):
         inner_client = self.client_wrapper[node]
         return inner_client.create_object(module,  *args, **kwargs)
-
-
-class IrisGradContext:
-    def __init__(self, ctx, node):
-        super().__init__()
-        self.ctx = ctx
-        self.node = node
-
-    def __enter__(self):
-        self.torch_autograd_context = self.ctx.client_wrapper[self.node].create_object(
-            dist_autograd.context, False)
-        self.context_id = self.torch_autograd_context.__enter__()
-        return self.context_id
-
-    def __exit__(self, type, value, track):
-        self.torch_autograd_context.__exit__(type, value, track)
-
-
-class IrisOptimizer:
-    def __init__(self, ctx, node, models, context_id):
-        super().__init__()
-        self.node = node
-        self.models = models
-        self.ctx = ctx
-        self.context_id = context_id
-
-        self.model_parameters = [self.get_parameter(m) for m in self.models]
-        self.model_parameters = self.ctx.client_wrapper[node].batch_wait(
-            self.model_parameters)
-        self.model_parameters_id = [IrisObjectId(
-            m.id()) for m in self.model_parameters]
-
-        parameters = self.ctx.client_wrapper[node].apply(
-            func=lambda *x: functools.reduce(lambda a, b: a+b, x),
-            args=(self.model_parameters_id),
-            kwargs=None,
-            pickle=dill
-        )
-        # b = optim.SGD
-        b = optim.Adadelta
-        self.optimizer = self.ctx.client_wrapper[node].create_object(
-            DistributedOptimizer,
-            False,
-            ModuleRef(module=b.__module__, qualname=b.__qualname__),
-            parameters,
-            lr=1.0
-        )
-
-    def get_loss(self, loss):
-        if loss.node == self.node:
-            return loss
-        r_a = self.ctx.client_wrapper[self.node].inner.torch_call(
-            target_node=loss.node,
-            object_id=loss.id.id,
-            torch_func="torch_GetObject",
-            to_here=True,
-            pickle=dill
-        )
-        return IrisObject(r_a, self.node, self.ctx, None, None)
-
-    def backward(self, loss):
-        if type(loss) is list:
-            loss = list(map(self.get_loss, loss))
-            loss = list(map(lambda x: x.id, loss))
-        else:
-            loss = self.get_loss(loss)
-            loss = [loss.id]
-        args = (self.context_id.id, loss)
-        module = dist_autograd.backward
-        self.ctx.client_wrapper[self.node].inner.create_object(
-            module=module.__module__,
-            qualname=module.__name__,
-            b_args=args,
-            b_kwargs=None,
-            pickle=dill
-        )
-
-    def step(self):
-        self.optimizer.step(self.context_id)
-
-    def get_parameter(self, model):
-        if model.node == self.node:
-            return self.ctx.client_wrapper[self.node].get_parameter_async(model.id)
-        else:
-            return self.ctx.client_wrapper[self.node].inner.torch_call_async(
-                target_node=model.node,
-                object_id=model.id.id,
-                torch_func="torch_GetParameters",
-                to_here=True,
-                pickle=dill
-            )
-
 
 class IrisObject:
     def __init__(self, inner, node, ctx, args, kwargs):
@@ -375,16 +270,6 @@ class IrisClientWrapper:
             raise exception
         # print("time cost", r.time_cost_as_sec())
         return IrisObject(r, self.node, self.ctx, args, kwargs)
-
-    def torch_call(self):
-        pass
-
-    def get_parameter(self, object_id):
-        r = self.inner.get_parameter(object_id.id)
-        return IrisObject(r, self.node, self.ctx, None, None)
-
-    def get_parameter_async(self, object_id):
-        return IrisAsyncTask(self.inner.get_parameter_async(object_id.id), self.inner)
 
     def apply(self, func, args, kwargs):
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)

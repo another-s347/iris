@@ -15,11 +15,9 @@ service Greeter {
   rpc Init (InitRequest) returns (NodeObject) {}
   rpc Call (CallRequest) returns (RemoteResult) {}
   rpc Apply (ApplyRequest) returns (RemoteResult) {}
-  rpc TorchCall(TorchRpcCallRequest) returns (NodeObject) {}
   rpc GetAttr(GetAttrRequest) returns (NodeObject) {}
-  rpc GetParameter(GetParameterRequest) returns (NodeObject) {}
-  rpc GetValue(GetParameterRequest) returns (Value) {}
-  rpc DelObject(GetParameterRequest) returns (ObjectId) {}
+  rpc GetValue(NodeObjectRef) returns (Value) {}
+  rpc DelObject(NodeObjectRef) returns (NodeObjectRef) {}
   rpc GetRemoteObject(NodeObjectRef) returns (NodeObject) {}
 }
 
@@ -72,15 +70,6 @@ message ApplyRequest {
   CallArgs arg = 2;
 }
 
-message TorchRpcCallRequest {
-  string target_node = 1;
-  uint64 object_id = 2;
-  string attr = 3;
-  CallArgs arg = 4;
-  string torch_func = 5;
-  bool to_here = 6;
-}
-
 message ConnectRequest {
   repeated Node nodes = 1;
 }
@@ -103,18 +92,10 @@ message GetAttrRequest {
   string attr = 2;
 }
 
-message GetParameterRequest {
-  uint64 object_id = 1;
-}
-
-message ModuleRef {
-  string module = 1;
-  string qualname = 2;
-}
-
-message ObjectId {
-  uint64 id = 1;
-}
+// message ModuleRef {
+//   string module = 1;
+//   string qualname = 2;
+// }
 
 message Value {
   bytes data = 1;

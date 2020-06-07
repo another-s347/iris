@@ -96,7 +96,7 @@ impl GuardedIrisObject {
         self.node_ref.exception.as_ref()
     }
 
-    fn _del(&mut self, request: GetParameterRequest) {
+    fn _del(&mut self, request: NodeObjectRef) {
         let mut client = self.client.clone();
         self.runtime_handle.spawn(async move {
             client
@@ -109,8 +109,9 @@ impl GuardedIrisObject {
 
 impl Drop for GuardedIrisObject {
     fn drop(&mut self) {
-        let request = GetParameterRequest {
-            object_id: self.node_ref.id,
+        let request = NodeObjectRef {
+            id: self.node_ref.id,
+            location: Default::default()
         };
         // println!("drop object {}, type {}", self.node_ref.id, self.node_ref.r#type);
         self._del(request)
@@ -120,8 +121,9 @@ impl Drop for GuardedIrisObject {
 #[pymethods]
 impl IrisObjectInternal {
     fn get_value<'p>(&mut self, py: Python<'p>) -> Option<&'p PyBytes> {
-        let request = GetParameterRequest {
-            object_id: self.inner.node_ref.id,
+        let request = NodeObjectRef {
+            id: self.inner.node_ref.id,
+            location: Default::default()
         };
         let data = py.allow_threads(|| self._get_value(request));
         return data.map(|x| PyBytes::new(py, x.as_ref()));
@@ -199,7 +201,7 @@ impl IrisObjectInternal {
 }
 
 impl IrisObjectInternal {
-    fn _del(&mut self, request: GetParameterRequest) {
+    fn _del(&mut self, request: NodeObjectRef) {
         let mut client = self.inner.client.clone();
         self.inner.runtime_handle.spawn(async move {
             client
@@ -209,7 +211,7 @@ impl IrisObjectInternal {
         });
     }
 
-    fn _get_value(&mut self, request: GetParameterRequest) -> Option<Vec<u8>> {
+    fn _get_value(&mut self, request: NodeObjectRef) -> Option<Vec<u8>> {
         let task_handle = self.inner.runtime_handle.block_on(
             self.inner
                 .client
@@ -291,83 +293,30 @@ impl IrisClientInternal {
             .unwrap();
     }
 
-    fn _torch_call(&mut self, request: TorchRpcCallRequest) -> IrisObjectInternal {
-        let start = Instant::now();
-        let task_handle = self
-            .runtime_handle
-            .block_on(self.client.torch_call(tonic::Request::new(request)));
-        unimplemented!()
-        // IrisObjectInternal {
-        //     inner: Arc::new(GuardedIrisObject {
-        //         runtime_handle: self.runtime_handle.clone(),
-        //         client: self.client.clone(),
-        //         node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
-        //         time_cost: Instant::now() - start,
-        //     }),
-        // }
-    }
 
-    fn _torch_call_async(
-        &mut self,
-        request: TorchRpcCallRequest,
-    ) -> JoinHandle<IrisObjectInternal> {
-        let mut client = self.client.clone();
-        let runtime_handle = self.runtime_handle.clone();
-        unimplemented!()
-        // let task_handle = self.runtime_handle.spawn(async move {
-        //     let start = Instant::now();
-        //     let result = client.torch_call(tonic::Request::new(request)).await;
-        //     IrisObjectInternal {
-        //         inner: Arc::new(GuardedIrisObject {
-        //             client,
-        //             runtime_handle,
-        //             node_ref: result.map(|x| x.into_inner()).unwrap(),
-        //             time_cost: Instant::now() - start,
-        //         }),
-        //     }
-        // });
-        // task_handle
-    }
 
-    fn _get_parameter(&mut self, request: GetParameterRequest) -> IrisObjectInternal {
-        let start = Instant::now();
-        let task_handle = self
-            .runtime_handle
-            .block_on(self.client.get_parameter(tonic::Request::new(request)));
+    // fn _torch_call_async(
+    //     &mut self,
+    //     request: TorchRpcCallRequest,
+    // ) -> JoinHandle<IrisObjectInternal> {
+    //     let mut client = self.client.clone();
+    //     let runtime_handle = self.runtime_handle.clone();
+    //     unimplemented!()
+    //     // let task_handle = self.runtime_handle.spawn(async move {
+    //     //     let start = Instant::now();
+    //     //     let result = client.torch_call(tonic::Request::new(request)).await;
+    //     //     IrisObjectInternal {
+    //     //         inner: Arc::new(GuardedIrisObject {
+    //     //             client,
+    //     //             runtime_handle,
+    //     //             node_ref: result.map(|x| x.into_inner()).unwrap(),
+    //     //             time_cost: Instant::now() - start,
+    //     //         }),
+    //     //     }
+    //     // });
+    //     // task_handle
+    // }
 
-        IrisObjectInternal {
-            inner: Arc::new(GuardedIrisObject {
-                runtime_handle: self.runtime_handle.clone(),
-                client: self.client.clone(),
-                node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
-                time_cost: Instant::now() - start,
-                mem_ref: self.mem.clone(),
-            }),
-        }
-    }
-
-    fn _get_parameter_async(
-        &mut self,
-        request: GetParameterRequest,
-    ) -> JoinHandle<IrisObjectInternal> {
-        let start = Instant::now();
-        let mut client = self.client.clone();
-        let runtime_handle = self.runtime_handle.clone();
-        let mem = self.mem.clone();
-        let task_handle = self.runtime_handle.spawn(async move {
-            let result = client.get_parameter(tonic::Request::new(request)).await;
-            IrisObjectInternal {
-                inner: Arc::new(GuardedIrisObject {
-                    client,
-                    runtime_handle,
-                    node_ref: result.map(|x| x.into_inner()).unwrap(),
-                    time_cost: Instant::now() - start,
-                    mem_ref: mem,
-                }),
-            }
-        });
-        task_handle
-    }
 
     fn _apply(&mut self, request: ApplyRequest) -> IrisObjectInternal {
         let start = Instant::now();
@@ -444,20 +393,6 @@ impl IrisClientInternal {
         py.allow_threads(|| self._apply(request))
     }
 
-    fn get_parameter(&mut self, py: Python<'_>, object_id: u64) -> IrisObjectInternal {
-        let request = GetParameterRequest { object_id };
-        py.allow_threads(|| self._get_parameter(request))
-    }
-
-    fn get_parameter_async(&mut self, py: Python<'_>, object_id: u64) -> AsyncTaskKey {
-        let request = GetParameterRequest { object_id };
-        let task = AsyncIrisObjectTask {
-            inner: self._get_parameter_async(request),
-        };
-        let key = uuid::Uuid::new_v4();
-        self.async_tasks.insert(key, task);
-        AsyncTaskKey { uuid: key }
-    }
 
     fn get_remote_object(&mut self, py: Python<'_>, obj: &IrisObjectInternal) -> IrisObjectInternal {
         let start = std::time::Instant::now();
@@ -523,70 +458,40 @@ impl IrisClientInternal {
         Ok(())
     }
 
-    fn torch_call(
-        &mut self,
-        py: Python<'_>,
-        target_node: &str,
-        object_id: u64,
-        attr: Option<String>,
-        b_args: Option<&PyTuple>,
-        b_kwargs: Option<&PyDict>,
-        torch_func: Option<&str>,
-        to_here: bool,
-        pickle: &PyAny,
-    ) -> PyResult<IrisObjectInternal> {
-        let arg = new_arg_request(
-            b_args,
-            b_kwargs,
-            py,
-            &pickle.to_object(py),
-            self.node.as_str(),
-        );
-        let request = TorchRpcCallRequest {
-            target_node: target_node.to_owned(),
-            object_id,
-            attr: attr.unwrap_or_default(),
-            arg,
-            torch_func: torch_func.unwrap_or_default().to_owned(),
-            to_here,
-        };
-        Ok(py.allow_threads(|| self._torch_call(request)))
-    }
-
-    fn torch_call_async(
-        &mut self,
-        py: Python<'_>,
-        target_node: &str,
-        object_id: u64,
-        attr: Option<String>,
-        b_args: Option<&PyTuple>,
-        b_kwargs: Option<&PyDict>,
-        torch_func: Option<&str>,
-        to_here: bool,
-        pickle: &PyAny,
-    ) -> AsyncTaskKey {
-        let arg = new_arg_request(
-            b_args,
-            b_kwargs,
-            py,
-            &pickle.to_object(py),
-            self.node.as_str(),
-        );
-        let request = TorchRpcCallRequest {
-            target_node: target_node.to_owned(),
-            object_id,
-            attr: attr.unwrap_or_default(),
-            arg,
-            torch_func: torch_func.unwrap_or_default().to_owned(),
-            to_here,
-        };
-        let task = AsyncIrisObjectTask {
-            inner: self._torch_call_async(request),
-        };
-        let key = uuid::Uuid::new_v4();
-        self.async_tasks.insert(key, task);
-        AsyncTaskKey { uuid: key }
-    }
+    // fn torch_call_async(
+    //     &mut self,
+    //     py: Python<'_>,
+    //     target_node: &str,
+    //     object_id: u64,
+    //     attr: Option<String>,
+    //     b_args: Option<&PyTuple>,
+    //     b_kwargs: Option<&PyDict>,
+    //     torch_func: Option<&str>,
+    //     to_here: bool,
+    //     pickle: &PyAny,
+    // ) -> AsyncTaskKey {
+    //     let arg = new_arg_request(
+    //         b_args,
+    //         b_kwargs,
+    //         py,
+    //         &pickle.to_object(py),
+    //         self.node.as_str(),
+    //     );
+    //     let request = TorchRpcCallRequest {
+    //         target_node: target_node.to_owned(),
+    //         object_id,
+    //         attr: attr.unwrap_or_default(),
+    //         arg,
+    //         torch_func: torch_func.unwrap_or_default().to_owned(),
+    //         to_here,
+    //     };
+    //     let task = AsyncIrisObjectTask {
+    //         inner: self._torch_call_async(request),
+    //     };
+    //     let key = uuid::Uuid::new_v4();
+    //     self.async_tasks.insert(key, task);
+    //     AsyncTaskKey { uuid: key }
+    // }
 
     fn connect_nodes(&mut self, py: Python<'_>, mut nodes: HashMap<String, String>) {
         let request = ConnectRequest {

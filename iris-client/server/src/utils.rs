@@ -35,6 +35,14 @@ use tonic::{
 };
 use uuid;
 
+pub fn dbg_py<T>(py: Python<'_>, x: PyResult<T>) -> PyResult<T> {
+    if let Err(err) = &x {
+        let err = err.clone_ref(py);
+        err.print(py);
+    }
+    x
+}
+
 pub fn dumps<T>(pickle: &PyObject, py: Python<'_>, err: T) -> PyResult<Vec<u8>>
 where
     T: IntoPy<PyObject>,

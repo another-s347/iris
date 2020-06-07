@@ -37,7 +37,7 @@ impl N2n for NodeServer {
             let pickle = pickle.to_object(py);
             let object = objects.get(&request.id).unwrap();
             let object: &Py<PyAny> = &object;
-            crate::dumps(&pickle, py, object).unwrap()
+            crate::utils::dumps(&pickle, py, object).unwrap()
         })
         .await.unwrap();
         let end = std::time::Instant::now();
