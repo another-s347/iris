@@ -240,9 +240,7 @@ impl IrisObjectInternal {
                 arg,
                 attr: attr.unwrap_or_default(),
             })));
-        let result = task_handle.unwrap().into_inner();
-        let node_ref = result.obj.unwrap();
-        let fetch_list = result.fetch_result;
+        let node_ref = task_handle.unwrap().into_inner();
         Some(IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.inner.runtime_handle.clone(),
@@ -280,9 +278,7 @@ impl IrisClientInternal {
         let task_handle = self
             .runtime_handle
             .block_on(self.client.create_object(tonic::Request::new(request)));
-        let result = task_handle.unwrap().into_inner();
-        let node_ref = result.obj.unwrap();
-        let fetch_list = result.fetch_result;
+        let node_ref = task_handle.unwrap().into_inner();
         IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),
@@ -327,9 +323,7 @@ impl IrisClientInternal {
         let task_handle = self
             .runtime_handle
             .block_on(self.client.apply(tonic::Request::new(request)));
-        let result = task_handle.unwrap().into_inner();
-        let node_ref = result.obj.unwrap();
-        let fetch_list = result.fetch_result;
+        let node_ref = task_handle.unwrap().into_inner();
         IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),

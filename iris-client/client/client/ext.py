@@ -258,6 +258,7 @@ class IrisClientWrapper:
         self.inner = inner
         self.node = node
         self.ctx = ctx
+        self.attrs = []
 
     def batch_wait(self, tasks):
         return self.inner.batch_wait([m.inner for m in tasks])
@@ -302,7 +303,7 @@ def retrieve_args(self, node, ctx, args, cls=tuple):
     holds_ref = []
     for arg in args:
         if type(arg) is IrisObject:
-            a.append(arg.id.add_attr(self.attrs))
+            a.append(arg.id.add_attr(arg.attrs))
         elif type(arg) is list:
             rr = retrieve_args(self, node, ctx, a,  list)
             holds_ref.extend(rr[1])

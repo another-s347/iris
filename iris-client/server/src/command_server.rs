@@ -107,9 +107,10 @@ impl IrisServer {
                 id.hash(&mut hasher);
                 let id = hasher.finish();
                 let obj = loads(&pickle, py, data.data.as_ref()).unwrap();
-                map.insert(o.id, Py::from(obj.as_ref(py)));
+                // println!("fetch object id#{}, {:?}", id, obj.as_ref(py).repr());
+                map.insert(id, Py::from(obj.as_ref(py)));
                 let mut result = HashMap::new();
-                result.insert(o.id, o.id);
+                result.insert(o.id, id);
                 result
             })
             .await
@@ -145,8 +146,8 @@ impl IrisServer {
                     let id = uuid::Uuid::new_v4();
                     id.hash(&mut hasher);
                     let id = hasher.finish();
-                    map.insert(r.id, Py::from(obj.as_ref(py)));
-                    ret.insert(r.id, r.id);
+                    map.insert(id, Py::from(obj.as_ref(py)));
+                    ret.insert(r.id, id);
                 }
                 ret
             })
@@ -166,25 +167,26 @@ fn _call(
     request: CallRequest,
     pickle: &PyObject,
     current_node: &str,
+    fetch_list: &HashMap<u64, u64>,
 ) -> PyResult<NodeObject> {
     let mut maps = object_map;
     let (args, kwargs) = if let Some(arg) = request.arg {
         (
-            map_args_to_local(&maps, py, arg.args, &pickle),
-            map_kwargs_to_local(&maps, py, arg.kwargs, &pickle),
+            map_args_to_local(&maps, py, arg.args, &pickle, fetch_list),
+            map_kwargs_to_local(&maps, py, arg.kwargs, &pickle, fetch_list),
         )
     } else {
         (PyTuple::empty(py).to_object(py), None)
     };
-    let o = maps.get(&request.object_id).unwrap().clone();
-    let mut o: &PyAny = o.as_ref(py);
+    let o = maps.get(&request.object_id).unwrap().value().clone();
+    let mut o = o.to_object(py);
     for attr in request.attr {
-        o = dbg_py(py, o.getattr(attr)).unwrap();
+        o = dbg_py(py, o.getattr(py, &attr)).unwrap();
     }
     let ret = if let Some(k) = kwargs {
-        o.call(args.cast_as(py)?, Some(k.cast_as(py)?))?
+        o.call(py, args.cast_as(py)?, Some(k.cast_as(py)?))?
     } else {
-        o.call(args.cast_as(py)?, None)?
+        o.call(py, args.cast_as(py)?, None)?
     };
 
     let mut hasher = DefaultHasher::new();
@@ -192,16 +194,16 @@ fn _call(
     id.hash(&mut hasher);
     let id = hasher.finish();
 
-    maps.insert(id, Py::from(ret));
+    maps.insert(id, Py::from(ret.as_ref(py)));
 
     let mut nodeobj = NodeObject {
         id,
-        r#type: ret.get_type().name().to_string(),
+        r#type: ret.as_ref(py).get_type().name().to_string(),
         location: current_node.to_owned(),
         ..Default::default()
     };
 
-    try_extract_native_value(ret, py, &mut nodeobj, &maps, current_node)?;
+    try_extract_native_value(ret.as_ref(py), py, &mut nodeobj, &maps, current_node)?;
 
     return Ok(nodeobj);
 }
@@ -278,6 +280,7 @@ fn create_object(
     request: CreateRequest,
     pickle: &PyObject,
     current_node: &str,
+    fetch_list: &HashMap<u64, u64>,
 ) -> PyResult<NodeObject> {
     let module = modules;
     if let Some(m) = module.get(&request.module) {
@@ -287,8 +290,8 @@ fn create_object(
         let (args, kwargs) = if let Some(arg) = request.arg {
             let pickle = pickle.to_object(py);
             (
-                map_args_to_local(&maps, py, arg.args, &pickle),
-                map_kwargs_to_local(&maps, py, arg.kwargs, &pickle),
+                map_args_to_local(&maps, py, arg.args, &pickle, fetch_list),
+                map_kwargs_to_local(&maps, py, arg.kwargs, &pickle, fetch_list),
             )
         } else {
             (PyTuple::empty(py).to_object(py), None)
@@ -331,12 +334,13 @@ fn apply(
     request: ApplyRequest,
     pickle: &PyObject,
     current_node: &str,
+    fetch_list: &HashMap<u64, u64>,
 ) -> PyResult<NodeObject> {
     let mut maps = object_map;
     let (args, kwargs) = if let Some(arg) = request.arg {
         (
-            map_args_to_local(&maps, py, arg.args, &pickle),
-            map_kwargs_to_local(&maps, py, arg.kwargs, &pickle),
+            map_args_to_local(&maps, py, arg.args, &pickle, fetch_list),
+            map_kwargs_to_local(&maps, py, arg.kwargs, &pickle, fetch_list),
         )
     } else {
         (PyTuple::empty(py).to_object(py), None)
@@ -416,10 +420,18 @@ impl Greeter for IrisServer {
         }));
     }
 
-    async fn call(&self, request: Request<CallRequest>) -> Result<Response<RemoteResult>, Status> {
+    async fn call(&self, request: Request<CallRequest>) -> Result<Response<NodeObject>, Status> {
         let start = std::time::Instant::now();
-        let request: CallRequest = request.into_inner();
+        let mut request: CallRequest = request.into_inner();
         let fetch_list = if let Some(arg) = &request.arg {
+            if arg
+                .fetch_lists
+                .iter()
+                .find(|x| x.id == request.object_id)
+                .is_some()
+            {
+                unimplemented!()
+            }
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 self.fetch_remote(&arg.fetch_lists),
@@ -429,6 +441,11 @@ impl Greeter for IrisServer {
         } else {
             Default::default()
         };
+        if let Some(id) = fetch_list.get(&request.object_id) {
+            unimplemented!()
+            // request.object_id = id;
+            // request.attr.clear();
+        }
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
         let name = self.current_node.clone();
@@ -438,7 +455,7 @@ impl Greeter for IrisServer {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
-                let result = _call(object_map, py, request, &pickle, name.as_str());
+                let result = _call(object_map, py, request, &pickle, name.as_str(), &fetch_list);
                 map_result(&pickle, py, result, name.as_str())
             }),
         )
@@ -449,16 +466,13 @@ impl Greeter for IrisServer {
         let d: std::time::Duration = end - start;
         self.profile
             .update("call", move |key, (count, value)| (count + 1, *value + d));
-        return Ok(Response::new(RemoteResult {
-            obj: Some(call_task),
-            fetch_result: fetch_list,
-        }));
+        return Ok(Response::new(call_task));
     }
 
     async fn create_object(
         &self,
         request: Request<CreateRequest>,
-    ) -> Result<Response<RemoteResult>, Status> {
+    ) -> Result<Response<NodeObject>, Status> {
         let start = std::time::Instant::now();
         let request = request.into_inner();
         let fetch_list = if let Some(arg) = &request.arg {
@@ -481,8 +495,15 @@ impl Greeter for IrisServer {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
-                let result =
-                    create_object(object_map, modules, py, request, &pickle, name.as_str());
+                let result = create_object(
+                    object_map,
+                    modules,
+                    py,
+                    request,
+                    &pickle,
+                    name.as_str(),
+                    &fetch_list,
+                );
                 map_result(&pickle, py, result, name.as_str())
             }),
         )
@@ -493,16 +514,10 @@ impl Greeter for IrisServer {
         let d: std::time::Duration = end - start;
         self.profile
             .update("create", move |key, (count, value)| (count + 1, *value + d));
-        return Ok(Response::new(RemoteResult {
-            obj: Some(result),
-            fetch_result: fetch_list,
-        }));
+        return Ok(Response::new(result));
     }
 
-    async fn apply(
-        &self,
-        request: Request<ApplyRequest>,
-    ) -> Result<Response<RemoteResult>, Status> {
+    async fn apply(&self, request: Request<ApplyRequest>) -> Result<Response<NodeObject>, Status> {
         let start = std::time::Instant::now();
         let request = request.into_inner();
         let fetch_list = if let Some(arg) = &request.arg {
@@ -525,7 +540,7 @@ impl Greeter for IrisServer {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
-                let result = apply(object_map, py, request, &pickle, name.as_str());
+                let result = apply(object_map, py, request, &pickle, name.as_str(), &fetch_list);
                 map_result(&pickle, py, result, name.as_str())
             }),
         )
@@ -536,10 +551,7 @@ impl Greeter for IrisServer {
         let d: std::time::Duration = end - start;
         self.profile
             .update("apply", move |key, (count, value)| (count + 1, *value + d));
-        return Ok(Response::new(RemoteResult {
-            obj: Some(result),
-            fetch_result: fetch_list,
-        }));
+        return Ok(Response::new(result));
     }
 
     async fn get_remote_object(

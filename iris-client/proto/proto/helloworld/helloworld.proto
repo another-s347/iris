@@ -10,21 +10,21 @@ package helloworld;
 service Greeter {
   // Sends a greeting
   rpc SayHello (HelloRequest) returns (HelloReply) {}
-  rpc CreateObject (CreateRequest) returns (RemoteResult) {}
+  rpc CreateObject (CreateRequest) returns (NodeObject) {}
   rpc ConnectNodes (ConnectRequest) returns (HelloReply) {}
   rpc Init (InitRequest) returns (NodeObject) {}
-  rpc Call (CallRequest) returns (RemoteResult) {}
-  rpc Apply (ApplyRequest) returns (RemoteResult) {}
+  rpc Call (CallRequest) returns (NodeObject) {}
+  rpc Apply (ApplyRequest) returns (NodeObject) {}
   rpc GetAttr(GetAttrRequest) returns (NodeObject) {}
   rpc GetValue(NodeObjectRef) returns (Value) {}
   rpc DelObject(NodeObjectRef) returns (NodeObjectRef) {}
   rpc GetRemoteObject(NodeObjectRef) returns (NodeObject) {}
 }
 
-message RemoteResult {
-  NodeObject obj = 1;
-  map<uint64, uint64> fetch_result = 2;
-}
+// message RemoteResult {
+//   NodeObject obj = 1;
+//   map<uint64, uint64> fetch_result = 2;
+// }
 
 // The request message containing the user's name.
 message HelloRequest {

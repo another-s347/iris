@@ -44,7 +44,7 @@ impl N2n for NodeServer {
             for attr in request.attr {
                 object = object.getattr(py, attr).unwrap();
             }
-            crate::utils::dumps(&pickle, py, object).unwrap()
+            crate::utils::dbg_py(py,crate::utils::dumps(&pickle, py, object)).unwrap()
         })
         .await.unwrap();
         let end = std::time::Instant::now();
