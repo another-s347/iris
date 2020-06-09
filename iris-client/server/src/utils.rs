@@ -1,39 +1,32 @@
 
-use common::IrisObjectId;
+
 use dashmap::DashMap;
-use dict_derive::{FromPyObject, IntoPyObject};
+
 use futures::prelude::*;
-use futures::stream::TryStreamExt;
+
 use hello_world::{
-    greeter_server::{Greeter, GreeterServer},
     *,
 };
 
 use proto::hello_world;
-use proto::n2n;
-use pyo3::exceptions;
+
+
 use pyo3::prelude::*;
 use pyo3::{
     types::{IntoPyDict, PyBytes, PyDict, PyList, PyTuple, PyType},
     AsPyPointer, PyNativeType, PyTypeInfo,
 };
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hash;
-use std::hash::Hasher;
+
+
+
 use std::{
     collections::HashMap,
-    net::SocketAddr,
-    path::Path,
-    sync::{Arc, Mutex},
 };
-use structopt::StructOpt;
-use tokio::net::UnixListener;
-use tokio::task;
-use tonic::{
-    transport::{Server, Uri},
-    Request, Response, Status,
-};
-use uuid;
+
+
+
+
+
 
 pub fn dbg_py<T>(py: Python<'_>, x: PyResult<T>) -> PyResult<T> {
     if let Err(err) = &x {
@@ -86,7 +79,7 @@ pub fn map_result(
 }
 
 pub fn map_kwargs_to_local<'a>(
-    object_map: &DashMap<u64, Py<PyAny>>,
+    object_map: &crate::mem::Mem,
     py: Python<'a>,
     args: Option<ProtoPyDict>,
     pickle: &PyObject,
@@ -101,7 +94,7 @@ pub fn map_kwargs_to_local<'a>(
 }
 
 pub fn map_args_to_local<'a>(
-    object_map: &DashMap<u64, Py<PyAny>>,
+    object_map: &crate::mem::Mem,
     py: Python<'a>,
     args: Option<ProtoPyTuple>,
     pickle: &PyObject,
@@ -116,7 +109,7 @@ pub fn map_args_to_local<'a>(
 }
 
 pub fn map_kwargs_to_local_impl<'a>(
-    maps: &DashMap<u64, Py<PyAny>>,
+    maps: &crate::mem::Mem,
     py: Python<'a>,
     args: ProtoPyDict,
     pickle: &PyObject,
@@ -179,7 +172,7 @@ pub fn map_kwargs_to_local_impl<'a>(
 }
 
 pub fn map_list_to_local_impl<'a>(
-    maps: &DashMap<u64, Py<PyAny>>,
+    maps: &crate::mem::Mem,
     py: Python<'a>,
     args: ProtoPyList,
     pickle: &PyObject,
@@ -244,7 +237,7 @@ pub fn map_list_to_local_impl<'a>(
 }
 
 pub fn map_args_to_local_impl<'a>(
-    maps: &DashMap<u64, Py<PyAny>>,
+    maps: &crate::mem::Mem,
     py: Python<'a>,
     args: ProtoPyTuple,
     pickle: &PyObject,

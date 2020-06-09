@@ -1,6 +1,5 @@
-use common::IrisObjectId;
 use dashmap::DashMap;
-use dict_derive::{FromPyObject, IntoPyObject};
+
 use futures::prelude::*;
 use futures::stream::TryStreamExt;
 use hello_world::{
@@ -9,16 +8,9 @@ use hello_world::{
 };
 
 use proto::hello_world;
-use proto::n2n;
-use pyo3::exceptions;
+
 use pyo3::prelude::*;
-use pyo3::{
-    types::{IntoPyDict, PyBytes, PyDict, PyList, PyTuple, PyType},
-    AsPyPointer, PyNativeType, PyTypeInfo,
-};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hash;
-use std::hash::Hasher;
+
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -27,17 +19,16 @@ use std::{
 };
 use structopt::StructOpt;
 use tokio::net::UnixListener;
-use tokio::task;
+
 use tonic::{
     transport::{Server, Uri},
     Request, Response, Status,
 };
-use uuid;
 
+pub mod command_server;
 pub mod distributed;
 pub mod utils;
-pub mod command_server;
-
+pub mod mem;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example", about = "An example of StructOpt usage.")]
@@ -81,12 +72,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     profile.insert("del", (0, std::time::Duration::default()));
     let profile = Arc::new(profile);
 
-    let objects = Arc::new(DashMap::new());
+    let objects = crate::mem::Mem::default();
+    let addrs = Arc::new(DashMap::new());
 
     let distributed_server = distributed::NodeServer {
         pickle: pickle.clone(),
         objects: objects.clone(),
-        current_node: format!("node{}:{}", opt.address, opt.port)
+        current_node: format!("node{}:{}", opt.address, opt.port),
+        node_addr: addrs.clone(),
     };
 
     let greeter = command_server::IrisServer {
@@ -96,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pickle,
         profile: profile.clone(),
         current_node: Arc::new(format!("node{}:{}", opt.address, opt.port)),
+        nodes_addr: addrs
     };
     let p = profile.clone();
     let (tx, mut rx) = tokio::sync::broadcast::channel(1);
@@ -132,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server_n2n.await
     });
 
-    let (r1, r2) = tokio::join!(server_iris, t2);
+    let (_r1, _r2) = tokio::join!(server_iris, t2);
 
     tokio::fs::remove_file(Path::new(&path)).await?;
 

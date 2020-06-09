@@ -10,7 +10,9 @@ package n2n;
 // The greeting service definition.
 service N2N {
   // Sends a greeting
+  rpc Hello(HelloRequest) returns (HelloReply) {}
   rpc GetObject (NodeObjectRef) returns (Value) {}
+  rpc DelObject (ObjectId) returns (ObjectId) {}
 }
 
 // The request message containing the user's name.

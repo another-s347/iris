@@ -5,25 +5,25 @@ use futures::prelude::*;
 use hello_world::greeter_client::GreeterClient;
 use hello_world::*;
 use pyo3::prelude::*;
-use pyo3::pyclass::PyClass;
+
 use pyo3::types::{PyBytes, PyList};
 use pyo3::types::{PyDict, PyTuple};
 use pyo3::wrap_pyfunction;
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::convert::TryFrom;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::UnixStream;
+
 use tokio::prelude::*;
-use tokio::runtime;
-use tokio::sync::oneshot;
+
+
 use tokio::task::JoinHandle;
 use tonic;
-use tonic::transport::{Endpoint, Uri};
-use tower::service_fn;
+
+
 use uuid;
 
 type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
@@ -338,7 +338,7 @@ impl IrisClientInternal {
 
 #[pymethods]
 impl IrisClientInternal {
-    fn add_set_result(&mut self, py: Python<'_>, async_task: AsyncTaskKey, callback: &PyAny) {
+    fn add_set_result(&mut self, _py: Python<'_>, async_task: AsyncTaskKey, callback: &PyAny) {
         let object: PyObject = callback.into();
         if let Some(task) = self.async_tasks.remove(&async_task.uuid) {
             let t = task.inner.then(|x| async move {
