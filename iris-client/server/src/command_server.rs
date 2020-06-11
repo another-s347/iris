@@ -15,8 +15,10 @@ use pyo3::{
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::sync::atomic::Ordering;
 use std::{
     collections::HashMap,
+    convert::TryInto,
     net::SocketAddr,
     path::Path,
     sync::{Arc, Mutex},
@@ -26,6 +28,8 @@ use crate::distributed;
 use crate::utils::*;
 use tokio::task;
 use tonic::{Request, Response, Status};
+use tracing::{debug, event, info, instrument, span, Level};
+use tracing_futures::*;
 use uuid;
 #[derive(Debug, Clone)]
 pub struct IrisServer {
@@ -34,8 +38,9 @@ pub struct IrisServer {
     pub nodes: Arc<DashMap<String, distributed::DistributedClient>>,
     pub nodes_addr: Arc<DashMap<SocketAddr, String>>,
     pub pickle: Py<PyModule>,
-    pub profile: Arc<dashmap::DashMap<&'static str, (usize, std::time::Duration)>>,
     pub current_node: Arc<String>,
+    pub metrics: crate::metrics::ExecutionMeter,
+    pub clock: quanta::Clock
 }
 
 impl IrisServer {
@@ -66,10 +71,14 @@ impl IrisServer {
     }
 
     // TODO: Optimize?
+    #[instrument(skip(self, fetch_list))]
     async fn fetch_remote(&self, fetch_list: &Vec<NodeObjectRef>) -> HashMap<u64, u64> {
+        // let span = span!(Level::TRACE, "fetch");
+        // let _g = span.enter();
         if fetch_list.len() == 0 {
             return Default::default();
         }
+        event!(Level::DEBUG, fetch_list=?fetch_list);
         let mut bytes_c = 0;
         let start = std::time::Instant::now();
         let result = if fetch_list.len() == 1 {
@@ -87,7 +96,7 @@ impl IrisServer {
                 .unwrap()
                 .into_inner();
             let mid = std::time::Instant::now();
-            println!("recv {:?}", mid - recv_start);
+            info!("recv {:?}", mid - recv_start);
             let o = o.clone();
             let map = self.objects.clone();
             let pickle = self.pickle.clone();
@@ -359,10 +368,14 @@ impl Greeter for IrisServer {
         // let addr = request.remote_addr().unwrap();
         let request = request.into_inner();
         for node in request.nodes {
-            let mut client = distributed::connect(format!("http://{}",node.address)).await.unwrap();
-            let reply = client.hello(n2n::HelloRequest {
-                name: self.current_node.as_str().to_owned(),
-            }).await;
+            let mut client = distributed::connect(format!("http://{}", node.address))
+                .await
+                .unwrap();
+            let reply = client
+                .hello(n2n::HelloRequest {
+                    name: self.current_node.as_str().to_owned(),
+                })
+                .await;
             println!("connected to {}", node.name);
             self.nodes.insert(node.name.clone(), client);
         }
@@ -392,7 +405,8 @@ impl Greeter for IrisServer {
     }
 
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<NodeObject>, Status> {
-        let start = std::time::Instant::now();
+        // let clock = quanta::Clock::new();
+        let start = self.clock.start();
         let request: CallRequest = request.into_inner();
         let fetch_list = if let Some(arg) = &request.arg {
             tokio::time::timeout(
@@ -428,10 +442,12 @@ impl Greeter for IrisServer {
         .await
         .unwrap()
         .unwrap();
-        let end = std::time::Instant::now();
-        let d: std::time::Duration = end - start;
-        self.profile
-            .update("call", move |_key, (count, value)| (count + 1, *value + d));
+        let end = self.clock.end();
+        let duration = self.clock.delta(start, end).as_nanos().try_into().unwrap();
+        self.metrics.call_hitcount.fetch_add(1, Ordering::SeqCst);
+        self.metrics
+            .call_responsetime
+            .fetch_add(duration, Ordering::SeqCst);
         return Ok(Response::new(call_task));
     }
 
@@ -439,7 +455,8 @@ impl Greeter for IrisServer {
         &self,
         request: Request<CreateRequest>,
     ) -> Result<Response<NodeObject>, Status> {
-        let start = std::time::Instant::now();
+        // let clock = quanta::Clock::new();
+        let start = self.clock.start();
         let request = request.into_inner();
         let fetch_list = if let Some(arg) = &request.arg {
             tokio::time::timeout(
@@ -477,11 +494,16 @@ impl Greeter for IrisServer {
         .await
         .unwrap()
         .unwrap();
-        let end = std::time::Instant::now();
-        let d: std::time::Duration = end - start;
-        self.profile.update("create", move |_key, (count, value)| {
-            (count + 1, *value + d)
-        });
+
+        let end = self.clock.end();
+        let duration = self.clock.delta(start, end).as_nanos().try_into().unwrap();
+        self.metrics
+            .createobject_hitcount
+            .fetch_add(1, Ordering::SeqCst);
+        self.metrics
+            .createobject_responsetime
+            .fetch_add(duration, Ordering::SeqCst);
+
         return Ok(Response::new(result));
     }
 
@@ -525,8 +547,6 @@ impl Greeter for IrisServer {
         .unwrap();
         let end = std::time::Instant::now();
         let d: std::time::Duration = end - start;
-        self.profile
-            .update("apply", move |_key, (count, value)| (count + 1, *value + d));
         return Ok(Response::new(result));
     }
 
@@ -555,7 +575,12 @@ impl Greeter for IrisServer {
         &self,
         request: Request<GetAttrRequest>,
     ) -> Result<Response<NodeObject>, Status> {
-        let start = std::time::Instant::now();
+        self.metrics
+            .getattr_throughput
+            .fetch_add(1, Ordering::SeqCst);
+        // let clock = quanta::Clock::new();
+        let start = self.clock.start();
+
         let request = request.into_inner();
         let maps = self.objects.clone();
         let id = tokio::time::timeout(
@@ -578,11 +603,15 @@ impl Greeter for IrisServer {
         .unwrap()
         .unwrap();
 
-        let end = std::time::Instant::now();
-        let d: std::time::Duration = end - start;
-        self.profile.update("getattr", move |_key, (count, value)| {
-            (count + 1, *value + d)
-        });
+        let end = self.clock.end();
+        let duration = self.clock.delta(start, end).as_nanos().try_into().unwrap();
+        self.metrics.getattr_hitcount.fetch_add(1, Ordering::SeqCst);
+        self.metrics
+            .getattr_responsetime
+            .fetch_add(duration, Ordering::SeqCst);
+        self.metrics
+            .getattr_throughput
+            .fetch_sub(1, Ordering::SeqCst);
         return Ok(Response::new(NodeObject {
             id,
             location: self.current_node.as_str().to_owned(),
@@ -609,10 +638,6 @@ impl Greeter for IrisServer {
             }
         }
 
-        let end = std::time::Instant::now();
-        let d: std::time::Duration = end - start;
-        self.profile
-            .update("del", move |_key, (count, value)| (count + 1, *value + d));
         return Ok(Response::new(request));
     }
 

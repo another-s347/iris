@@ -16,7 +16,14 @@ futures = "0.3"
 prost = "0.6"
 tower = "*"
 uuid = { version="0.8", features = ["v4"] } 
-ctrlc = { version = "3.0", features = ["termination"] }
+ctrlc = { version = "3.1.4", features = ["termination"] }
 dict_derive = "0.2.0"
 structopt = "*"
 dashmap = { version="4.0.0-rc5" }
+tracing = "0.1"
+tracing-subscriber = "0.2.5"
+tracing-futures = "0.2.4"
+opentelemetry = "0.6"
+tracing-opentelemetry = "0.5"
+opentelemetry-jaeger = "0.5"
+quanta = "0.5"

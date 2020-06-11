@@ -6,7 +6,7 @@ use n2n::{
 use proto::n2n;
 use pyo3::prelude::*;
 use pyo3::{prelude::PyModule, Py, PyAny, Python};
-use std::{sync::Arc, net::SocketAddr};
+use std::{sync::{atomic::Ordering, Arc}, net::SocketAddr, convert::TryInto};
 use tonic::{Request, Response};
 
 pub type DistributedClient = N2nClient<tonic::transport::channel::Channel>;
@@ -20,9 +20,12 @@ pub struct NodeServer {
     pub objects: crate::mem::Mem,
     pub pickle: Py<PyModule>,
     pub current_node: String,
-    pub node_addr: Arc<DashMap<SocketAddr, String>>
+    pub node_addr: Arc<DashMap<SocketAddr, String>>,
+    pub metrics: crate::metrics::ExecutionMeter,
+    pub clock: quanta::Clock,
     // pub nodes: Arc<DashMap<String, DistributedClient>>
 }
+
 
 #[tonic::async_trait]
 impl N2n for NodeServer {
@@ -50,16 +53,16 @@ impl N2n for NodeServer {
         &self,
         request: Request<n2n::NodeObjectRef>,
     ) -> Result<Response<n2n::Value>, tonic::Status> {
-        let start = std::time::Instant::now();
+        self.metrics.n2n_getobject_throughput.fetch_add(1, Ordering::SeqCst);
+        // let clock = quanta::Clock::new();
+        let start = self.clock.start();
         let addr = request.remote_addr().unwrap();
         let request = request.into_inner();
         if request.location != self.current_node {
             unimplemented!()
-        }// let peer_addr = request.remote_addr().unwrap();
-        // // let node_id = 
+        } 
         let pickle = self.pickle.clone();
         let objects = self.objects.clone();
-        println!("{:?}, {:?}", self.node_addr, addr);
         let node = self.node_addr.get(&addr).unwrap().value().clone();
         let object = tokio::task::spawn_blocking(move || {
             let gil = Python::acquire_gil();
@@ -74,8 +77,11 @@ impl N2n for NodeServer {
             crate::utils::dbg_py(py,crate::utils::dumps(&pickle, py, object)).unwrap()
         })
         .await.unwrap();
-        let end = std::time::Instant::now();
-        println!("get object {:?}, bytes: {}", end-start, object.len());
+        let end = self.clock.end();
+        let duration = self.clock.delta(start, end).as_nanos().try_into().unwrap();
+        self.metrics.n2n_getobject_hitcount.fetch_add(1, Ordering::SeqCst);
+        self.metrics.n2n_getobject_responsetime.fetch_add(duration, Ordering::SeqCst);
+        self.metrics.n2n_getobject_throughput.fetch_sub(1, Ordering::SeqCst);
         return Ok(Response::new(n2n::Value { data: object }));
     }
 }

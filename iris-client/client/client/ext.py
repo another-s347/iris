@@ -24,10 +24,10 @@ class IrisContext:
             modules=list(sys.modules.keys()), path=sys.path, rank=1)
         # self.client_wrapper["node2"].inner.init(modules = list(sys.modules.keys()), path=sys.path, rank=2)
         self.client_wrapper["node0"].inner.connect_nodes({
-            "node127.0.0.1:12346": "http://127.0.0.1:12346"
+            "node127.0.0.1:12346": "127.0.0.1:12346"
         })
         self.client_wrapper["node1"].inner.connect_nodes({
-            "node127.0.0.1:12345": "http://127.0.0.1:12345"
+            "node127.0.0.1:12345": "127.0.0.1:12345"
         })
 
     def create_object(self, node, module,  *args, **kwargs):

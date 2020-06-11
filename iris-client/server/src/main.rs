@@ -15,20 +15,28 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex}, pin::Pin, task::{Poll, Context},
 };
 use structopt::StructOpt;
-use tokio::net::UnixListener;
+use tokio::{io::{AsyncWrite, AsyncRead}, net::UnixListener};
 
 use tonic::{
     transport::{Server, Uri},
     Request, Response, Status,
 };
+use tracing::{debug, event, info, span, Level};
+use tracing_futures::*;
+use tracing_subscriber;
+use tracing_subscriber::{fmt, prelude::*, registry::Registry};
+use tracing_timing::{Builder, Histogram};
+use opentelemetry::{api::Provider, sdk};
+use metrics::CounterTcpStream;
 
 pub mod command_server;
 pub mod distributed;
-pub mod utils;
 pub mod mem;
+pub mod utils;
+pub mod metrics;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example", about = "An example of StructOpt usage.")]
@@ -50,6 +58,7 @@ struct Opt {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt: Opt = Opt::from_args();
+    setup_global_subscriber();
 
     let pickle = {
         let gil = Python::acquire_gil();
@@ -63,23 +72,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(Path::new(&path).parent().unwrap()).await?;
 
     let mut uds = UnixListener::bind(&path)?;
-
-    let profile = dashmap::DashMap::new();
-    profile.insert("call", (0, std::time::Duration::default()));
-    profile.insert("apply", (0, std::time::Duration::default()));
-    profile.insert("getattr", (0, std::time::Duration::default()));
-    profile.insert("create", (0, std::time::Duration::default()));
-    profile.insert("del", (0, std::time::Duration::default()));
-    let profile = Arc::new(profile);
+    let mut tcp = tokio::net::TcpListener::bind(SocketAddr::new(opt.address.parse().unwrap(), opt.port)).await?;
+    let traffic = metrics::DistributedTraffic::new();
 
     let objects = crate::mem::Mem::default();
     let addrs = Arc::new(DashMap::new());
+    let metrics = metrics::ExecutionMeter::default();
 
     let distributed_server = distributed::NodeServer {
         pickle: pickle.clone(),
         objects: objects.clone(),
         current_node: format!("node{}:{}", opt.address, opt.port),
         node_addr: addrs.clone(),
+        metrics: metrics.clone(),
+        clock: quanta::Clock::new(),
     };
 
     let greeter = command_server::IrisServer {
@@ -87,11 +93,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         objects: objects,
         nodes: Arc::new(DashMap::new()),
         pickle,
-        profile: profile.clone(),
         current_node: Arc::new(format!("node{}:{}", opt.address, opt.port)),
-        nodes_addr: addrs
+        nodes_addr: addrs,
+        metrics: metrics.clone(),
+        clock: quanta::Clock::new(),
     };
-    let p = profile.clone();
+
+    let t2 = traffic.clone();
     let (tx, mut rx) = tokio::sync::broadcast::channel(1);
     let mut rx2 = tx.subscribe();
     ctrlc::set_handler(move || {
@@ -100,12 +108,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .expect("Error setting Ctrl-C handler");
 
     tokio::spawn(async move {
+        // let span = span!(Level::TRACE, "profile");
+        // let _g = span.enter();
         let mut t = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             t.tick().await;
-            println!("{:?}", p);
+            event!(Level::DEBUG,"{:?}", metrics);
+            event!(Level::DEBUG,"{:?}", t2);
         }
-    });
+    }.instrument(tracing::info_span!("profile")));
 
     let server_iris = Server::builder()
         .add_service(GreeterServer::new(greeter))
@@ -119,8 +130,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let server_n2n = Server::builder()
             .concurrency_limit_per_connection(4096)
             .add_service(proto::n2n::n2n_server::N2nServer::new(distributed_server))
-            .serve_with_shutdown(
-                SocketAddr::new(opt.address.parse().unwrap(), opt.port),
+            .serve_with_incoming_shutdown(
+                tcp.incoming().map_ok(|x|{
+                    let counter = metrics::TrafficCounter::default();
+                    traffic.nodes.insert(x.peer_addr().unwrap(), counter.clone());
+                    x.set_nodelay(true).unwrap();
+                    CounterTcpStream(x, counter)
+                }),
                 rx2.recv().map(|_| ()),
             );
         server_n2n.await
@@ -132,6 +148,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+fn setup_global_subscriber() {
+    let exporter = opentelemetry_jaeger::Exporter::builder()
+        .with_agent_endpoint("127.0.0.1:6831".parse().unwrap())
+        .with_process(opentelemetry_jaeger::Process {
+            service_name: "report_example".to_string(),
+            tags: Vec::new(),
+        })
+        .init().unwrap();
+    let provider = sdk::Provider::builder()
+        .with_simple_exporter(exporter)
+        .with_config(sdk::Config {
+            default_sampler: Box::new(sdk::Sampler::Always),
+            ..Default::default()
+        })
+        .build();
+    let tracer = provider.get_tracer("tracing");
+    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+    let filter = tracing_subscriber::filter::EnvFilter::new("server=trace,mio=info,hyper=info");
+    let fmt_layer = fmt::Layer::default();
+
+    let subscriber = Registry::default()
+    .with(filter)
+    .with(fmt_layer)
+    .with(telemetry)
+    ;
+
+    tracing::subscriber::set_global_default(subscriber).expect("Could not set global default");
+}
+
+
 
 #[cfg(unix)]
 mod unix {
