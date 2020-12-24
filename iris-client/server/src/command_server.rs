@@ -31,7 +31,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, event, info, instrument, span, Level};
 use tracing_futures::*;
 use uuid;
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IrisServer {
     pub modules: Arc<DashMap<String, Py<PyModule>>>,
     pub objects: crate::mem::Mem,
@@ -173,10 +173,10 @@ fn _call(
     } else {
         (PyTuple::empty(py).to_object(py), None)
     };
-    let o = maps.get(&request.object_id).unwrap();
+    let o = maps.get(request.object_id).unwrap();
     let mut o = o.to_object(py);
     for attr in request.attr {
-        o = dbg_py(py, o.getattr(py, &attr)).unwrap();
+        o = dbg_py(py, o.getattr(py, &attr))?;
     }
     let ret = if let Some(k) = kwargs {
         o.call(py, args.cast_as(py)?, Some(k.cast_as(py)?))?
@@ -188,7 +188,7 @@ fn _call(
 
     let mut nodeobj = NodeObject {
         id,
-        r#type: ret.as_ref(py).get_type().name().to_string(),
+        r#type: ret.as_ref(py).get_type().name()?.to_string(),
         location: current_node.to_owned(),
         ..Default::default()
     };
@@ -294,7 +294,7 @@ fn create_object(
 
         let mut nodeobj = NodeObject {
             id,
-            r#type: ret.get_type().name().to_string(),
+            r#type: ret.get_type().name()?.to_string(),
             location: current_node.to_owned(),
             ..Default::default()
         };
@@ -304,7 +304,7 @@ fn create_object(
         return Ok(nodeobj);
     } else {
         let err =
-            PyErr::new::<exceptions::KeyError, _>(format!("Module {} not found.", request.module));
+            PyErr::new::<exceptions::PyKeyError, _>(format!("Module {} not found.", request.module));
         return Err(err);
     }
 }
@@ -341,7 +341,7 @@ fn apply(
 
     let mut nodeobj = NodeObject {
         id,
-        r#type: ret.get_type().name().to_string(),
+        r#type: ret.get_type().name()?.to_string(),
         location: current_node.to_owned(),
         ..Default::default()
     };
@@ -391,6 +391,7 @@ impl Greeter for IrisServer {
         let pickle = self.pickle.clone();
         let pickle = pickle.to_object(py);
         if let Err(err) = self.import_modules(py, modules, paths) {
+            println!("{:?}",err);
             return Ok(Response::new(NodeObject {
                 exception: dumps(&pickle, py, err).unwrap(),
                 location: self.current_node.as_str().to_owned(),
@@ -580,16 +581,15 @@ impl Greeter for IrisServer {
             .fetch_add(1, Ordering::SeqCst);
         // let clock = quanta::Clock::new();
         let start = self.clock.start();
-
         let request = request.into_inner();
         let maps = self.objects.clone();
+        let obj = maps.get(request.object_id).unwrap();
         let id = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tokio::task::spawn_blocking(move || {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 // let mut maps = &self.objects; //.lock().unwrap();
-                let obj = maps.get(&request.object_id).unwrap();
                 let obj = obj.to_object(py);
                 let mut obj = obj.as_ref(py);
                 for attr in request.attr {
@@ -644,6 +644,7 @@ impl Greeter for IrisServer {
     async fn get_value(&self, request: Request<NodeObjectRef>) -> Result<Response<Value>, Status> {
         let request = request.into_inner();
         let maps = self.objects.clone();
+        let mut obj = maps.get(request.id).unwrap();
         let pickle = self.pickle.clone();
         let data = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -652,7 +653,6 @@ impl Greeter for IrisServer {
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
                 // let maps = &self.objects; //.lock().unwrap();
-                let mut obj = maps.get(&request.id).unwrap().to_object(py);
                 for attr in request.attr {
                     obj = obj.getattr(py, attr).unwrap();
                 }

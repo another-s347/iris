@@ -63,13 +63,13 @@ impl N2n for NodeServer {
         } 
         let pickle = self.pickle.clone();
         let objects = self.objects.clone();
+        let object = objects.get(request.id).unwrap();
         let node = self.node_addr.get(&addr).unwrap().value().clone();
         let object = tokio::task::spawn_blocking(move || {
             let gil = Python::acquire_gil();
             let py = gil.python();
             let pickle = pickle.to_object(py);
             objects.insert_out_ref(request.id, node);
-            let object = objects.get(&request.id).unwrap();
             let mut object = object.to_object(py);
             for attr in request.attr {
                 object = object.getattr(py, attr).unwrap();

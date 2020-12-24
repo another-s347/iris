@@ -1,4 +1,4 @@
-#![feature(async_closure)]
+// #![feature(async_closure)]
 use common::IrisObjectId;
 use futures::future::join_all;
 use futures::prelude::*;

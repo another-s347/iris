@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 common = { path="../common" }
 proto = { path="../proto" }
-pyo3 = "0.10.1"
+pyo3 = "0.13"
 tokio = { version="0.2", features = ["full"] }
 tonic = "0.2"
 futures = "0.3"
@@ -23,7 +23,9 @@ dashmap = { version="4.0.0-rc5" }
 tracing = "0.1"
 tracing-subscriber = "0.2.5"
 tracing-futures = "0.2.4"
+tracing-timing = "*"
 opentelemetry = "0.6"
 tracing-opentelemetry = "0.5"
 opentelemetry-jaeger = "0.5"
 quanta = "0.5"
+waitmap = "1.1.0"

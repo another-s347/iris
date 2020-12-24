@@ -107,16 +107,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .expect("Error setting Ctrl-C handler");
 
-    tokio::spawn(async move {
-        // let span = span!(Level::TRACE, "profile");
-        // let _g = span.enter();
-        let mut t = tokio::time::interval(std::time::Duration::from_secs(1));
-        loop {
-            t.tick().await;
-            event!(Level::DEBUG,"{:?}", metrics);
-            event!(Level::DEBUG,"{:?}", t2);
-        }
-    }.instrument(tracing::info_span!("profile")));
+    // tokio::spawn(async move {
+    //     // let span = span!(Level::TRACE, "profile");
+    //     // let _g = span.enter();
+    //     let mut t = tokio::time::interval(std::time::Duration::from_secs(1));
+    //     loop {
+    //         t.tick().await;
+    //         event!(Level::DEBUG,"{:?}", metrics);
+    //         event!(Level::DEBUG,"{:?}", t2);
+    //     }
+    // }.instrument(tracing::info_span!("profile")));
 
     let server_iris = Server::builder()
         .add_service(GreeterServer::new(greeter))
