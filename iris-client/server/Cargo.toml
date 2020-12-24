@@ -28,4 +28,6 @@ opentelemetry = "0.6"
 tracing-opentelemetry = "0.5"
 opentelemetry-jaeger = "0.5"
 quanta = "0.5"
-waitmap = "1.1.0"
+waitmap = { path="/home/skye/waitmap" }
+async-recursion = "0.3"
+dhat = "0.2.1"

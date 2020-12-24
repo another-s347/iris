@@ -1,3 +1,8 @@
+// use dhat::{Dhat, DhatAlloc};
+
+// #[global_allocator]
+// static ALLOCATOR: DhatAlloc = DhatAlloc;
+
 use dashmap::DashMap;
 
 use futures::prelude::*;
@@ -57,6 +62,7 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // let _dhat = Dhat::start_heap_profiling();
     let opt: Opt = Opt::from_args();
     setup_global_subscriber();
 

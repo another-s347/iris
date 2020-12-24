@@ -40,7 +40,7 @@ pub struct IrisServer {
     pub pickle: Py<PyModule>,
     pub current_node: Arc<String>,
     pub metrics: crate::metrics::ExecutionMeter,
-    pub clock: quanta::Clock
+    pub clock: quanta::Clock,
 }
 
 impl IrisServer {
@@ -162,19 +162,20 @@ fn _call(
     request: CallRequest,
     pickle: &PyObject,
     current_node: &str,
-    fetch_list: &HashMap<u64, u64>,
+    args: Option<(LocalObject, Option<LocalObject>)>,
+    mut o: PyObject,
 ) -> PyResult<NodeObject> {
     let maps = object_map;
-    let (args, kwargs) = if let Some(arg) = request.arg {
+    let (args, kwargs) = if let Some(arg) = args {
         (
-            map_args_to_local(&maps,  arg.args,  fetch_list).to_pyobject(py, pickle),
-            map_kwargs_to_local(&maps, arg.kwargs,  fetch_list).map(|x|x.to_pyobject(py, pickle)),
+            arg.0.to_pyobject(py, pickle),
+            arg.1.map(|x| x.to_pyobject(py, pickle)),
         )
     } else {
         (PyTuple::empty(py).to_object(py), None)
     };
-    let o = maps.get(request.object_id).unwrap();
-    let mut o = o.to_object(py);
+    // let o = maps.get(request.object_id).unwrap();
+    // let mut o = o.to_object(py);
     for attr in request.attr {
         o = dbg_py(py, o.getattr(py, &attr))?;
     }
@@ -266,18 +267,18 @@ fn create_object(
     request: CreateRequest,
     pickle: &PyObject,
     current_node: &str,
-    fetch_list: &HashMap<u64, u64>,
+    args: Option<(LocalObject, Option<LocalObject>)>,
 ) -> PyResult<NodeObject> {
     let module = modules;
     if let Some(m) = module.get(&request.module) {
         let m = m.to_object(py);
         let m = m.getattr(py, request.qualname)?;
         let maps = object_map;
-        let (args, kwargs) = if let Some(arg) = request.arg {
+        let (args, kwargs) = if let Some(arg) = args {
             let pickle = pickle.to_object(py);
             (
-                map_args_to_local(&maps,  arg.args, fetch_list).to_pyobject(py, &pickle),
-                map_kwargs_to_local(&maps,arg.kwargs,  fetch_list).map(|x|x.to_pyobject(py, &pickle)),
+                arg.0.to_pyobject(py, &pickle),
+                arg.1.map(|x| x.to_pyobject(py, &pickle)),
             )
         } else {
             (PyTuple::empty(py).to_object(py), None)
@@ -303,8 +304,10 @@ fn create_object(
 
         return Ok(nodeobj);
     } else {
-        let err =
-            PyErr::new::<exceptions::PyKeyError, _>(format!("Module {} not found.", request.module));
+        let err = PyErr::new::<exceptions::PyKeyError, _>(format!(
+            "Module {} not found.",
+            request.module
+        ));
         return Err(err);
     }
 }
@@ -315,13 +318,13 @@ fn apply(
     request: ApplyRequest,
     pickle: &PyObject,
     current_node: &str,
-    fetch_list: &HashMap<u64, u64>,
+    args: Option<(LocalObject, Option<LocalObject>)>,
 ) -> PyResult<NodeObject> {
     let maps = object_map;
-    let (args, kwargs) = if let Some(arg) = request.arg {
+    let (args, kwargs) = if let Some(arg) = args {
         (
-            map_args_to_local(&maps,  arg.args,  fetch_list).to_pyobject(py, pickle),
-            map_kwargs_to_local(&maps, arg.kwargs,  fetch_list).map(|x|x.to_pyobject(py, pickle)),
+            arg.0.to_pyobject(py, pickle),
+            arg.1.map(|x| x.to_pyobject(py, pickle)),
         )
     } else {
         (PyTuple::empty(py).to_object(py), None)
@@ -391,7 +394,7 @@ impl Greeter for IrisServer {
         let pickle = self.pickle.clone();
         let pickle = pickle.to_object(py);
         if let Err(err) = self.import_modules(py, modules, paths) {
-            println!("{:?}",err);
+            println!("{:?}", err);
             return Ok(Response::new(NodeObject {
                 exception: dumps(&pickle, py, err).unwrap(),
                 location: self.current_node.as_str().to_owned(),
@@ -408,18 +411,23 @@ impl Greeter for IrisServer {
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<NodeObject>, Status> {
         // let clock = quanta::Clock::new();
         let start = self.clock.start();
-        let request: CallRequest = request.into_inner();
-        let fetch_list = if let Some(arg) = &request.arg {
-            tokio::time::timeout(
+        let mut request: CallRequest = request.into_inner();
+        let args = if let Some(arg) = &mut request.arg {
+            let fetch_list = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 self.fetch_remote(&arg.fetch_lists),
             )
             .await
-            .unwrap()
+            .unwrap();
+            self.objects.insert_in_ref(&fetch_list);
+            Some((
+                map_args_to_local(&self.objects, arg.args.take(), &fetch_list).await,
+                map_kwargs_to_local(&self.objects, arg.kwargs.take(), &fetch_list).await,
+            ))
         } else {
-            Default::default()
+            None
         };
-        self.objects.insert_in_ref(&fetch_list);
+        let o = self.objects.get(request.object_id).await.unwrap();
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
         let name = self.current_node.clone();
@@ -429,14 +437,7 @@ impl Greeter for IrisServer {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
-                let result = _call(
-                    &object_map,
-                    py,
-                    request,
-                    &pickle,
-                    name.as_str(),
-                    &fetch_list,
-                );
+                let result = _call(&object_map, py, request, &pickle, name.as_str(), args, o);
                 map_result(&pickle, py, result, name.as_str())
             }),
         )
@@ -458,18 +459,22 @@ impl Greeter for IrisServer {
     ) -> Result<Response<NodeObject>, Status> {
         // let clock = quanta::Clock::new();
         let start = self.clock.start();
-        let request = request.into_inner();
-        let fetch_list = if let Some(arg) = &request.arg {
-            tokio::time::timeout(
+        let mut request = request.into_inner();
+        let args = if let Some(arg) = &mut request.arg {
+            let fetch_list = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 self.fetch_remote(&arg.fetch_lists),
             )
             .await
-            .unwrap()
+            .unwrap();
+            self.objects.insert_in_ref(&fetch_list);
+            Some((
+                map_args_to_local(&self.objects, arg.args.take(), &fetch_list).await,
+                map_kwargs_to_local(&self.objects, arg.kwargs.take(), &fetch_list).await,
+            ))
         } else {
-            Default::default()
+            None
         };
-        self.objects.insert_in_ref(&fetch_list);
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
         let modules = self.modules.clone();
@@ -487,7 +492,7 @@ impl Greeter for IrisServer {
                     request,
                     &pickle,
                     name.as_str(),
-                    &fetch_list,
+                    args,
                 );
                 map_result(&pickle, py, result, name.as_str())
             }),
@@ -510,18 +515,22 @@ impl Greeter for IrisServer {
 
     async fn apply(&self, request: Request<ApplyRequest>) -> Result<Response<NodeObject>, Status> {
         let start = std::time::Instant::now();
-        let request = request.into_inner();
-        let fetch_list = if let Some(arg) = &request.arg {
-            tokio::time::timeout(
+        let mut request = request.into_inner();
+        let args = if let Some(arg) = &mut request.arg {
+            let fetch_list = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 self.fetch_remote(&arg.fetch_lists),
             )
             .await
-            .unwrap()
+            .unwrap();
+            self.objects.insert_in_ref(&fetch_list);
+            Some((
+                map_args_to_local(&self.objects, arg.args.take(), &fetch_list).await,
+                map_kwargs_to_local(&self.objects, arg.kwargs.take(), &fetch_list).await,
+            ))
         } else {
-            Default::default()
+            None
         };
-        self.objects.insert_in_ref(&fetch_list);
         let object_map = self.objects.clone();
         let pickle = self.pickle.clone();
         let _modules = self.modules.clone();
@@ -532,14 +541,7 @@ impl Greeter for IrisServer {
                 let gil = Python::acquire_gil();
                 let py = gil.python();
                 let pickle = pickle.to_object(py);
-                let result = apply(
-                    &object_map,
-                    py,
-                    request,
-                    &pickle,
-                    name.as_str(),
-                    &fetch_list,
-                );
+                let result = apply(&object_map, py, request, &pickle, name.as_str(), args);
                 map_result(&pickle, py, result, name.as_str())
             }),
         )
@@ -583,7 +585,7 @@ impl Greeter for IrisServer {
         let start = self.clock.start();
         let request = request.into_inner();
         let maps = self.objects.clone();
-        let obj = maps.get(request.object_id).unwrap();
+        let obj = maps.get(request.object_id).await.unwrap();
         let id = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tokio::task::spawn_blocking(move || {
@@ -644,7 +646,7 @@ impl Greeter for IrisServer {
     async fn get_value(&self, request: Request<NodeObjectRef>) -> Result<Response<Value>, Status> {
         let request = request.into_inner();
         let maps = self.objects.clone();
-        let mut obj = maps.get(request.id).unwrap();
+        let mut obj = maps.get(request.id).await.unwrap();
         let pickle = self.pickle.clone();
         let data = tokio::time::timeout(
             std::time::Duration::from_secs(2),

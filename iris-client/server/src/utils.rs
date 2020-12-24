@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-
+use async_recursion::async_recursion;
 use futures::prelude::*;
 
 use hello_world::*;
@@ -29,6 +29,7 @@ where
     let result = pickle.call_method1(py, "dumps", (err,))?;
     let bytes: &PyBytes = result.cast_as(py)?;
     let bytes = bytes.as_bytes().to_vec();
+    println!("dump size {}",bytes.len());
     Ok(bytes)
 }
 
@@ -111,7 +112,7 @@ impl LocalObject {
     }
 }
 
-pub fn map_kwargs_to_local<'a>(
+pub async fn map_kwargs_to_local<'a>(
     object_map: &crate::mem::Mem,
     args: Option<ProtoPyDict>,
     fetch_list: &HashMap<u64, u64>,
@@ -122,26 +123,27 @@ pub fn map_kwargs_to_local<'a>(
             &object_map,
             tuple,
             fetch_list,
-        ))
+        ).await)
     } else {
         None
     }
 }
 
-pub fn map_args_to_local<'a>(
+pub async fn map_args_to_local<'a>(
     object_map: &crate::mem::Mem,
     args: Option<ProtoPyTuple>,
     fetch_list: &HashMap<u64, u64>,
 ) -> LocalObject {
     let tuple = args;
     if let Some(tuple) = tuple {
-        map_args_to_local_impl(&object_map, tuple, fetch_list)
+        map_args_to_local_impl(&object_map, tuple, fetch_list).await
     } else {
         LocalObject::Tuples(Vec::new())
     }
 }
 
-pub fn map_kwargs_to_local_impl<'a>(
+#[async_recursion]
+pub async fn map_kwargs_to_local_impl<'a>(
     maps: &crate::mem::Mem,
     args: ProtoPyDict,
     fetch_list: &HashMap<u64, u64>,
@@ -165,7 +167,7 @@ pub fn map_kwargs_to_local_impl<'a>(
             Some(proto_py_any::Data::Dict(dict)) => {
                 tuple_args.push((
                     key,
-                    map_kwargs_to_local_impl(maps, dict, fetch_list),
+                    map_kwargs_to_local_impl(maps, dict, fetch_list).await,
                 ));
             }
             Some(proto_py_any::Data::F32(f)) => {
@@ -185,7 +187,7 @@ pub fn map_kwargs_to_local_impl<'a>(
                     id.id = *new_id;
                     id.attr.clear();
                 }
-                let o = maps.get(id.id).expect(&format!("id {}", id.id));
+                let o = maps.get(id.id).await.expect(&format!("id {}", id.id));
                 // for attr in id.attr {
                 //     o = o.getattr(py, attr).unwrap();
                 // }
@@ -194,13 +196,13 @@ pub fn map_kwargs_to_local_impl<'a>(
             Some(proto_py_any::Data::List(list)) => {
                 tuple_args.push((
                     key,
-                    map_list_to_local_impl(maps, list, fetch_list),
+                    map_list_to_local_impl(maps, list, fetch_list).await,
                 ));
             }
             Some(proto_py_any::Data::Tuple(tuple)) => {
                 tuple_args.push((
                     key,
-                    map_args_to_local_impl(maps, tuple, fetch_list),
+                    map_args_to_local_impl(maps, tuple, fetch_list).await,
                 ));
             }
             None => {}
@@ -211,7 +213,8 @@ pub fn map_kwargs_to_local_impl<'a>(
     // tuple_args.into_py_dict(py).to_object(py)
 }
 
-pub fn map_list_to_local_impl<'a>(
+#[async_recursion]
+pub async fn map_list_to_local_impl<'a>(
     maps: &crate::mem::Mem,
     args: ProtoPyList,
     fetch_list: &HashMap<u64, u64>,
@@ -234,7 +237,7 @@ pub fn map_list_to_local_impl<'a>(
                 tuple_args.push(LocalObject::Bytes(bytes));
             }
             Some(proto_py_any::Data::Dict(dict)) => {
-                tuple_args.push(map_kwargs_to_local_impl(maps, dict, fetch_list));
+                tuple_args.push(map_kwargs_to_local_impl(maps, dict, fetch_list).await);
             }
             Some(proto_py_any::Data::F32(f)) => {
                 tuple_args.push(LocalObject::F32(f));
@@ -253,7 +256,7 @@ pub fn map_list_to_local_impl<'a>(
                     id.id = *new_id;
                     id.attr.clear();
                 }
-                let o = maps.get(id.id).expect(&format!("id {}", id.id));
+                let o = maps.get(id.id).await.expect(&format!("id {}", id.id));
                 // let mut o = o.to_object(py);
                 // for attr in id.attr {
                 //     o = o.getattr(py, attr).unwrap();
@@ -261,10 +264,10 @@ pub fn map_list_to_local_impl<'a>(
                 tuple_args.push(LocalObject::Object(o, id.attr));
             }
             Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push(map_list_to_local_impl(maps, list, fetch_list))
+                tuple_args.push(map_list_to_local_impl(maps, list, fetch_list).await)
             }
             Some(proto_py_any::Data::Tuple(tuple)) => {
-                tuple_args.push(map_args_to_local_impl(maps, tuple, fetch_list));
+                tuple_args.push(map_args_to_local_impl(maps, tuple, fetch_list).await);
             }
             None => {}
         }
@@ -274,7 +277,8 @@ pub fn map_list_to_local_impl<'a>(
     // PyList::new(py, tuple_args.iter().map(|x| x.as_ref(py))).to_object(py)
 }
 
-pub fn map_args_to_local_impl<'a>(
+#[async_recursion]
+pub async fn map_args_to_local_impl<'a>(
     maps: &crate::mem::Mem,
     args: ProtoPyTuple,
     fetch_list: &HashMap<u64, u64>,
@@ -297,7 +301,7 @@ pub fn map_args_to_local_impl<'a>(
                 tuple_args.push(LocalObject::Bytes(bytes));
             }
             Some(proto_py_any::Data::Dict(dict)) => {
-                tuple_args.push(map_kwargs_to_local_impl(maps, dict, fetch_list));
+                tuple_args.push(map_kwargs_to_local_impl(maps, dict, fetch_list).await);
             }
             Some(proto_py_any::Data::F32(f)) => {
                 tuple_args.push(LocalObject::F32(f));
@@ -316,7 +320,7 @@ pub fn map_args_to_local_impl<'a>(
                     id.id = *new_id;
                     id.attr.clear();
                 }
-                let o = maps.get(id.id).expect(&format!("id {}", id.id));
+                let o = maps.get(id.id).await.expect(&format!("id {}", id.id));
                 // let mut o = o.to_object(py);
                 // for attr in id.attr {
                 //     o = o.getattr(py, attr).unwrap();
@@ -324,10 +328,10 @@ pub fn map_args_to_local_impl<'a>(
                 tuple_args.push(LocalObject::Object(o, id.attr));
             }
             Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push(map_list_to_local_impl(maps, list,  fetch_list))
+                tuple_args.push(map_list_to_local_impl(maps, list,  fetch_list).await);
             }
             Some(proto_py_any::Data::Tuple(tuple)) => {
-                tuple_args.push(map_args_to_local_impl(maps, tuple, fetch_list));
+                tuple_args.push(map_args_to_local_impl(maps, tuple, fetch_list).await);
             }
             None => {}
         }
