@@ -167,8 +167,8 @@ fn _call(
     let maps = object_map;
     let (args, kwargs) = if let Some(arg) = request.arg {
         (
-            map_args_to_local(&maps, py, arg.args, &pickle, fetch_list),
-            map_kwargs_to_local(&maps, py, arg.kwargs, &pickle, fetch_list),
+            map_args_to_local(&maps,  arg.args,  fetch_list).to_pyobject(py, pickle),
+            map_kwargs_to_local(&maps, arg.kwargs,  fetch_list).map(|x|x.to_pyobject(py, pickle)),
         )
     } else {
         (PyTuple::empty(py).to_object(py), None)
@@ -276,8 +276,8 @@ fn create_object(
         let (args, kwargs) = if let Some(arg) = request.arg {
             let pickle = pickle.to_object(py);
             (
-                map_args_to_local(&maps, py, arg.args, &pickle, fetch_list),
-                map_kwargs_to_local(&maps, py, arg.kwargs, &pickle, fetch_list),
+                map_args_to_local(&maps,  arg.args, fetch_list).to_pyobject(py, &pickle),
+                map_kwargs_to_local(&maps,arg.kwargs,  fetch_list).map(|x|x.to_pyobject(py, &pickle)),
             )
         } else {
             (PyTuple::empty(py).to_object(py), None)
@@ -320,8 +320,8 @@ fn apply(
     let maps = object_map;
     let (args, kwargs) = if let Some(arg) = request.arg {
         (
-            map_args_to_local(&maps, py, arg.args, &pickle, fetch_list),
-            map_kwargs_to_local(&maps, py, arg.kwargs, &pickle, fetch_list),
+            map_args_to_local(&maps,  arg.args,  fetch_list).to_pyobject(py, pickle),
+            map_kwargs_to_local(&maps, arg.kwargs,  fetch_list).map(|x|x.to_pyobject(py, pickle)),
         )
     } else {
         (PyTuple::empty(py).to_object(py), None)

@@ -64,20 +64,63 @@ pub fn map_result(
     }
 }
 
+pub enum LocalObject {
+    List(Vec<LocalObject>),
+    Kwargs(Vec<(String, LocalObject)>),
+    Tuples(Vec<LocalObject>),
+    I32(i32),
+    I64(i64),
+    Boolean(bool),
+    F32(f32),
+    U64(u64),
+    U32(u32),
+    Str(String),
+    Object(PyObject, Vec<String>),
+    Bytes(Vec<u8>),
+}
+
+impl LocalObject {
+    pub fn to_pyobject(self, py: Python<'_>, pickle: &PyObject) -> PyObject {
+        match self {
+            LocalObject::List(mut x) => {
+                PyList::new(py, x.drain(0..).map(|i|i.to_pyobject(py, pickle))).to_object(py)
+            }
+            LocalObject::Kwargs(mut x) => {
+                x.drain(0..).map(|(key,o)|(key,o.to_pyobject(py, pickle))).into_py_dict(py).to_object(py)
+            }
+            LocalObject::Tuples(mut x) => {
+                PyTuple::new(py, x.drain(0..).map(|i|i.to_pyobject(py, pickle))).to_object(py)
+            }
+            LocalObject::I32(x) => x.to_object(py),
+            LocalObject::I64(x) => x.to_object(py),
+            LocalObject::Boolean(x) => x.to_object(py),
+            LocalObject::F32(x) => x.to_object(py),
+            LocalObject::U64(x) => x.to_object(py),
+            LocalObject::U32(x) => x.to_object(py),
+            LocalObject::Str(x) => x.to_object(py),
+            LocalObject::Object(mut o, attrs) => {
+                for attr in attrs {
+                    o = o.getattr(py, attr).unwrap();
+                }
+                o
+            }
+            LocalObject::Bytes(bytes) => {
+                loads(pickle, py, bytes.as_ref()).unwrap()
+            }
+        }
+    }
+}
+
 pub fn map_kwargs_to_local<'a>(
     object_map: &crate::mem::Mem,
-    py: Python<'a>,
     args: Option<ProtoPyDict>,
-    pickle: &PyObject,
     fetch_list: &HashMap<u64, u64>,
-) -> Option<PyObject> {
+) -> Option<LocalObject> {
     let tuple = args;
     if let Some(tuple) = tuple {
         Some(map_kwargs_to_local_impl(
             &object_map,
-            py,
             tuple,
-            pickle,
             fetch_list,
         ))
     } else {
@@ -87,59 +130,55 @@ pub fn map_kwargs_to_local<'a>(
 
 pub fn map_args_to_local<'a>(
     object_map: &crate::mem::Mem,
-    py: Python<'a>,
     args: Option<ProtoPyTuple>,
-    pickle: &PyObject,
     fetch_list: &HashMap<u64, u64>,
-) -> PyObject {
+) -> LocalObject {
     let tuple = args;
     if let Some(tuple) = tuple {
-        map_args_to_local_impl(&object_map, py, tuple, pickle, fetch_list)
+        map_args_to_local_impl(&object_map, tuple, fetch_list)
     } else {
-        PyTuple::empty(py).to_object(py)
+        LocalObject::Tuples(Vec::new())
     }
 }
 
 pub fn map_kwargs_to_local_impl<'a>(
     maps: &crate::mem::Mem,
-    py: Python<'a>,
     args: ProtoPyDict,
-    pickle: &PyObject,
     fetch_list: &HashMap<u64, u64>,
-) -> PyObject {
+) -> LocalObject {
     let mut tuple_args = vec![];
     for (key, x) in args.map {
         match x.data {
             Some(proto_py_any::Data::I32(x)) => {
-                tuple_args.push((key, x.to_object(py)));
+                tuple_args.push((key, LocalObject::I32(x)));
             }
             Some(proto_py_any::Data::I64(x)) => {
-                tuple_args.push((key, x.to_object(py)));
+                tuple_args.push((key, LocalObject::I64(x)));
             }
             Some(proto_py_any::Data::Boolean(b)) => {
-                tuple_args.push((key, b.to_object(py)));
+                tuple_args.push((key, LocalObject::Boolean(b)));
             }
             Some(proto_py_any::Data::Bytes(bytes)) => {
-                let o = loads(pickle, py, bytes.as_ref()).unwrap();
-                tuple_args.push((key, o));
+                // let o = loads(pickle, py, bytes.as_ref()).unwrap();
+                tuple_args.push((key, LocalObject::Bytes(bytes)));
             }
             Some(proto_py_any::Data::Dict(dict)) => {
                 tuple_args.push((
                     key,
-                    map_kwargs_to_local_impl(maps, py, dict, pickle, fetch_list),
+                    map_kwargs_to_local_impl(maps, dict, fetch_list),
                 ));
             }
             Some(proto_py_any::Data::F32(f)) => {
-                tuple_args.push((key, f.to_object(py)));
+                tuple_args.push((key, LocalObject::F32(f)));
             }
             Some(proto_py_any::Data::U32(x)) => {
-                tuple_args.push((key, x.to_object(py)));
+                tuple_args.push((key, LocalObject::U32(x)));
             }
             Some(proto_py_any::Data::U64(x)) => {
-                tuple_args.push((key, x.to_object(py)));
+                tuple_args.push((key, LocalObject::U64(x)));
             }
             Some(proto_py_any::Data::Str(s)) => {
-                tuple_args.push((key, s.to_object(py)));
+                tuple_args.push((key, LocalObject::Str(s)));
             }
             Some(proto_py_any::Data::ObjectId(mut id)) => {
                 if let Some(new_id) = fetch_list.get(&id.id) {
@@ -147,70 +186,67 @@ pub fn map_kwargs_to_local_impl<'a>(
                     id.attr.clear();
                 }
                 let o = maps.get(id.id).expect(&format!("id {}", id.id));
-                let mut o = o.to_object(py);
-                for attr in id.attr {
-                    o = o.getattr(py, attr).unwrap();
-                }
-                tuple_args.push((key, o));
+                // for attr in id.attr {
+                //     o = o.getattr(py, attr).unwrap();
+                // }
+                tuple_args.push((key, LocalObject::Object(o, id.attr)));
             }
             Some(proto_py_any::Data::List(list)) => {
                 tuple_args.push((
                     key,
-                    map_list_to_local_impl(maps, py, list, pickle, fetch_list),
+                    map_list_to_local_impl(maps, list, fetch_list),
                 ));
             }
             Some(proto_py_any::Data::Tuple(tuple)) => {
                 tuple_args.push((
                     key,
-                    map_args_to_local_impl(maps, py, tuple, pickle, fetch_list),
+                    map_args_to_local_impl(maps, tuple, fetch_list),
                 ));
             }
             None => {}
         }
     }
 
-    tuple_args.into_py_dict(py).to_object(py)
+    LocalObject::Kwargs(tuple_args)
+    // tuple_args.into_py_dict(py).to_object(py)
 }
 
 pub fn map_list_to_local_impl<'a>(
     maps: &crate::mem::Mem,
-    py: Python<'a>,
     args: ProtoPyList,
-    pickle: &PyObject,
     fetch_list: &HashMap<u64, u64>,
-) -> PyObject {
-    let mut tuple_args: Vec<PyObject> = vec![];
+) -> LocalObject {
+    let mut tuple_args: Vec<LocalObject> = vec![];
     // py.run("print(args)", Some(vec![("args", args)].into_py_dict(py)), None).unwrap();
     for x in args.items {
         match x.data {
             Some(proto_py_any::Data::I32(x)) => {
-                let object = x.to_object(py);
-                tuple_args.push(object);
+                tuple_args.push(LocalObject::I32(x));
             }
             Some(proto_py_any::Data::I64(x)) => {
-                tuple_args.push(x.to_object(py));
+                tuple_args.push(LocalObject::I64(x));
             }
             Some(proto_py_any::Data::Boolean(b)) => {
-                tuple_args.push(b.to_object(py));
+                tuple_args.push(LocalObject::Boolean(b));
             }
             Some(proto_py_any::Data::Bytes(bytes)) => {
-                let o = loads(pickle, py, bytes.as_ref()).unwrap();
-                tuple_args.push(o);
+                // let o = loads(pickle, py, bytes.as_ref()).unwrap();
+                tuple_args.push(LocalObject::Bytes(bytes));
             }
             Some(proto_py_any::Data::Dict(dict)) => {
-                tuple_args.push(map_kwargs_to_local_impl(maps, py, dict, pickle, fetch_list));
+                tuple_args.push(map_kwargs_to_local_impl(maps, dict, fetch_list));
             }
             Some(proto_py_any::Data::F32(f)) => {
-                tuple_args.push(f.to_object(py));
+                tuple_args.push(LocalObject::F32(f));
             }
             Some(proto_py_any::Data::U32(x)) => {
-                tuple_args.push(x.to_object(py));
+                tuple_args.push(LocalObject::U32(x));
             }
             Some(proto_py_any::Data::U64(x)) => {
-                tuple_args.push(x.to_object(py));
+                tuple_args.push(LocalObject::U64(x));
             }
             Some(proto_py_any::Data::Str(s)) => {
-                tuple_args.push(s.to_object(py));
+                tuple_args.push(LocalObject::Str(s));
             }
             Some(proto_py_any::Data::ObjectId(mut id)) => {
                 if let Some(new_id) = fetch_list.get(&id.id) {
@@ -218,64 +254,62 @@ pub fn map_list_to_local_impl<'a>(
                     id.attr.clear();
                 }
                 let o = maps.get(id.id).expect(&format!("id {}", id.id));
-                let mut o = o.to_object(py);
-                for attr in id.attr {
-                    o = o.getattr(py, attr).unwrap();
-                }
-                tuple_args.push(o);
+                // let mut o = o.to_object(py);
+                // for attr in id.attr {
+                //     o = o.getattr(py, attr).unwrap();
+                // }
+                tuple_args.push(LocalObject::Object(o, id.attr));
             }
             Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push(map_list_to_local_impl(maps, py, list, pickle, fetch_list))
+                tuple_args.push(map_list_to_local_impl(maps, list, fetch_list))
             }
             Some(proto_py_any::Data::Tuple(tuple)) => {
-                tuple_args.push(map_args_to_local_impl(maps, py, tuple, pickle, fetch_list));
+                tuple_args.push(map_args_to_local_impl(maps, tuple, fetch_list));
             }
             None => {}
         }
     }
 
-    PyList::new(py, tuple_args.iter().map(|x| x.as_ref(py))).to_object(py)
+    LocalObject::List(tuple_args)
+    // PyList::new(py, tuple_args.iter().map(|x| x.as_ref(py))).to_object(py)
 }
 
 pub fn map_args_to_local_impl<'a>(
     maps: &crate::mem::Mem,
-    py: Python<'a>,
     args: ProtoPyTuple,
-    pickle: &PyObject,
     fetch_list: &HashMap<u64, u64>,
-) -> PyObject {
-    let mut tuple_args: Vec<PyObject> = vec![];
+) -> LocalObject {
+    let mut tuple_args: Vec<LocalObject> = vec![];
     // py.run("print(args)", Some(vec![("args", args)].into_py_dict(py)), None).unwrap();
     for x in args.items {
         match x.data {
             Some(proto_py_any::Data::I32(x)) => {
-                let object = x.to_object(py);
-                tuple_args.push(object);
+                tuple_args.push(LocalObject::I32(x));
             }
             Some(proto_py_any::Data::I64(x)) => {
-                tuple_args.push(x.to_object(py));
+                tuple_args.push(LocalObject::I64(x));
             }
             Some(proto_py_any::Data::Boolean(b)) => {
-                tuple_args.push(b.to_object(py));
+                tuple_args.push(LocalObject::Boolean(b));
             }
             Some(proto_py_any::Data::Bytes(bytes)) => {
-                let o = loads(pickle, py, bytes.as_ref()).unwrap();
-                tuple_args.push(o);
+                // let o = loads(pickle, py, bytes.as_ref()).unwrap();
+                tuple_args.push(LocalObject::Bytes(bytes));
             }
             Some(proto_py_any::Data::Dict(dict)) => {
-                tuple_args.push(map_kwargs_to_local_impl(maps, py, dict, pickle, fetch_list));
+                tuple_args.push(map_kwargs_to_local_impl(maps, dict, fetch_list));
             }
             Some(proto_py_any::Data::F32(f)) => {
-                tuple_args.push(f.to_object(py));
+                tuple_args.push(LocalObject::F32(f));
             }
             Some(proto_py_any::Data::U32(x)) => {
-                tuple_args.push(x.to_object(py));
+                tuple_args.push(LocalObject::U32(x));
             }
             Some(proto_py_any::Data::U64(x)) => {
-                tuple_args.push(x.to_object(py));
+                tuple_args.push(LocalObject::U64(x));
             }
             Some(proto_py_any::Data::Str(s)) => {
-                tuple_args.push(s.to_object(py));
+                tuple_args.push(LocalObject::Str(s));
             }
             Some(proto_py_any::Data::ObjectId(mut id)) => {
                 if let Some(new_id) = fetch_list.get(&id.id) {
@@ -283,21 +317,22 @@ pub fn map_args_to_local_impl<'a>(
                     id.attr.clear();
                 }
                 let o = maps.get(id.id).expect(&format!("id {}", id.id));
-                let mut o = o.to_object(py);
-                for attr in id.attr {
-                    o = o.getattr(py, attr).unwrap();
-                }
-                tuple_args.push(o);
+                // let mut o = o.to_object(py);
+                // for attr in id.attr {
+                //     o = o.getattr(py, attr).unwrap();
+                // }
+                tuple_args.push(LocalObject::Object(o, id.attr));
             }
             Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push(map_list_to_local_impl(maps, py, list, pickle, fetch_list))
+                tuple_args.push(map_list_to_local_impl(maps, list,  fetch_list))
             }
             Some(proto_py_any::Data::Tuple(tuple)) => {
-                tuple_args.push(map_args_to_local_impl(maps, py, tuple, pickle, fetch_list));
+                tuple_args.push(map_args_to_local_impl(maps, tuple, fetch_list));
             }
             None => {}
         }
     }
 
-    PyTuple::new(py, tuple_args.iter().map(|x| x.as_ref(py))).to_object(py)
+    // PyTuple::new(py, tuple_args.iter().map(|x| x.as_ref(py))).to_object(py)
+    LocalObject::Tuples(tuple_args)
 }
