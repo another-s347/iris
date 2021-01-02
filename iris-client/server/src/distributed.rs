@@ -6,6 +6,7 @@ use n2n::{
 use proto::n2n;
 use pyo3::prelude::*;
 use pyo3::{prelude::PyModule, Py, PyAny, Python};
+use tracing::info;
 use std::{sync::{atomic::Ordering, Arc}, net::SocketAddr, convert::TryInto};
 use tonic::{Request, Response};
 
@@ -18,7 +19,7 @@ pub async fn connect(address: String) -> Result<DistributedClient, tonic::transp
 
 pub struct NodeServer {
     pub objects: crate::mem::Mem,
-    pub pickle: Py<PyModule>,
+    pub pickle: PyObject,
     pub current_node: String,
     pub node_addr: Arc<DashMap<SocketAddr, String>>,
     pub metrics: crate::metrics::ExecutionMeter,
@@ -60,7 +61,8 @@ impl N2n for NodeServer {
         let request = request.into_inner();
         if request.location != self.current_node {
             unimplemented!()
-        } 
+        }
+        info!("get object {}",request.id);
         let pickle = self.pickle.clone();
         let objects = self.objects.clone();
         let object = objects.get(request.id).await.unwrap();
@@ -70,7 +72,7 @@ impl N2n for NodeServer {
             let py = gil.python();
             let pickle = pickle.to_object(py);
             objects.insert_out_ref(request.id, node);
-            let mut object = object.to_object(py);
+            let mut object = object.get(&pickle,py).unwrap();
             for attr in request.attr {
                 object = object.getattr(py, attr).unwrap();
             }

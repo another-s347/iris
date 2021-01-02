@@ -1,9 +1,9 @@
-use dashmap::DashMap;
 use async_recursion::async_recursion;
+use dashmap::DashMap;
 use futures::prelude::*;
 
 use hello_world::*;
-
+use opentelemetry::api::correlation::Iter;
 use proto::hello_world;
 
 use pyo3::prelude::*;
@@ -12,24 +12,25 @@ use pyo3::{
     AsPyPointer, PyNativeType, PyTypeInfo,
 };
 
+use crate::mem::LazyPyObject;
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
-pub fn dbg_py<T>(py: Python<'_>, x: PyResult<T>) -> PyResult<T> {
-    if let Err(err) = &x {
-        let err = err.clone_ref(py);
+pub fn dbg_py<T>(py: Python<'_>, x: crate::error::Result<T>) -> crate::error::Result<T> {
+    if let Err(crate::error::Error::UserPyError{source,..}) = &x {
+        let err = source.clone_ref(py);
         err.print(py);
     }
     x
 }
 
-pub fn dumps<T>(pickle: &PyObject, py: Python<'_>, err: T) -> PyResult<Vec<u8>>
+pub fn dumps<T>(pickle: &PyObject, py: Python<'_>, err: T) -> crate::error::Result<Vec<u8>>
 where
     T: IntoPy<PyObject>,
 {
     let result = pickle.call_method1(py, "dumps", (err,))?;
-    let bytes: &PyBytes = result.cast_as(py)?;
+    let bytes: &PyBytes = result.cast_as(py).map_err(|x| anyhow::anyhow!("dump result cast error: {:#?}", x))?;
     let bytes = bytes.as_bytes().to_vec();
-    println!("dump size {}",bytes.len());
     Ok(bytes)
 }
 
@@ -76,21 +77,33 @@ pub enum LocalObject {
     U64(u64),
     U32(u32),
     Str(String),
-    Object(PyObject, Vec<String>),
+    Object(LazyPyObject, Vec<String>),
     Bytes(Vec<u8>),
+    None,
 }
 
 impl LocalObject {
-    pub fn to_pyobject(self, py: Python<'_>, pickle: &PyObject) -> PyObject {
-        match self {
+    pub fn to_pyobject(self, py: Python<'_>, pickle: &PyObject) -> Result<PyObject> {
+        Ok(match self {
             LocalObject::List(mut x) => {
-                PyList::new(py, x.drain(0..).map(|i|i.to_pyobject(py, pickle))).to_object(py)
+                let i: Vec<PyObject> = x
+                    .drain(0..)
+                    .map(|i| i.to_pyobject(py, pickle))
+                    .collect::<Result<Vec<PyObject>>>()?;
+                PyList::new(py, i).to_object(py)
             }
-            LocalObject::Kwargs(mut x) => {
-                x.drain(0..).map(|(key,o)|(key,o.to_pyobject(py, pickle))).into_py_dict(py).to_object(py)
-            }
+            LocalObject::Kwargs(mut x) => x
+                .drain(0..)
+                .map(|(key, o)| o.to_pyobject(py, pickle).map(|x| (key, x)))
+                .collect::<Result<Vec<_>>>()?
+                .into_py_dict(py)
+                .to_object(py),
             LocalObject::Tuples(mut x) => {
-                PyTuple::new(py, x.drain(0..).map(|i|i.to_pyobject(py, pickle))).to_object(py)
+                let i: Vec<PyObject> = x
+                    .drain(0..)
+                    .map(|i| i.to_pyobject(py, pickle))
+                    .collect::<Result<Vec<PyObject>>>()?;
+                PyTuple::new(py, i).to_object(py)
             }
             LocalObject::I32(x) => x.to_object(py),
             LocalObject::I64(x) => x.to_object(py),
@@ -99,16 +112,16 @@ impl LocalObject {
             LocalObject::U64(x) => x.to_object(py),
             LocalObject::U32(x) => x.to_object(py),
             LocalObject::Str(x) => x.to_object(py),
-            LocalObject::Object(mut o, attrs) => {
+            LocalObject::Object(o, attrs) => {
+                let mut o = o.get(pickle, py)?;
                 for attr in attrs {
-                    o = o.getattr(py, attr).unwrap();
+                    o = o.getattr(py, attr)?;
                 }
                 o
             }
-            LocalObject::Bytes(bytes) => {
-                loads(pickle, py, bytes.as_ref()).unwrap()
-            }
-        }
+            LocalObject::Bytes(bytes) => loads(pickle, py, bytes.as_ref())?,
+            LocalObject::None => py.None(),
+        })
     }
 }
 
@@ -119,11 +132,7 @@ pub async fn map_kwargs_to_local<'a>(
 ) -> Option<LocalObject> {
     let tuple = args;
     if let Some(tuple) = tuple {
-        Some(map_kwargs_to_local_impl(
-            &object_map,
-            tuple,
-            fetch_list,
-        ).await)
+        Some(map_kwargs_to_local_impl(&object_map, tuple, fetch_list).await)
     } else {
         None
     }
@@ -165,10 +174,7 @@ pub async fn map_kwargs_to_local_impl<'a>(
                 tuple_args.push((key, LocalObject::Bytes(bytes)));
             }
             Some(proto_py_any::Data::Dict(dict)) => {
-                tuple_args.push((
-                    key,
-                    map_kwargs_to_local_impl(maps, dict, fetch_list).await,
-                ));
+                tuple_args.push((key, map_kwargs_to_local_impl(maps, dict, fetch_list).await));
             }
             Some(proto_py_any::Data::F32(f)) => {
                 tuple_args.push((key, LocalObject::F32(f)));
@@ -194,16 +200,10 @@ pub async fn map_kwargs_to_local_impl<'a>(
                 tuple_args.push((key, LocalObject::Object(o, id.attr)));
             }
             Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push((
-                    key,
-                    map_list_to_local_impl(maps, list, fetch_list).await,
-                ));
+                tuple_args.push((key, map_list_to_local_impl(maps, list, fetch_list).await));
             }
             Some(proto_py_any::Data::Tuple(tuple)) => {
-                tuple_args.push((
-                    key,
-                    map_args_to_local_impl(maps, tuple, fetch_list).await,
-                ));
+                tuple_args.push((key, map_args_to_local_impl(maps, tuple, fetch_list).await));
             }
             None => {}
         }
@@ -328,7 +328,7 @@ pub async fn map_args_to_local_impl<'a>(
                 tuple_args.push(LocalObject::Object(o, id.attr));
             }
             Some(proto_py_any::Data::List(list)) => {
-                tuple_args.push(map_list_to_local_impl(maps, list,  fetch_list).await);
+                tuple_args.push(map_list_to_local_impl(maps, list, fetch_list).await);
             }
             Some(proto_py_any::Data::Tuple(tuple)) => {
                 tuple_args.push(map_args_to_local_impl(maps, tuple, fetch_list).await);

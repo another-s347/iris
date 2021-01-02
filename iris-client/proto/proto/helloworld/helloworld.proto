@@ -19,6 +19,7 @@ service Greeter {
   rpc GetValue(NodeObjectRef) returns (Value) {}
   rpc DelObject(NodeObjectRef) returns (NodeObjectRef) {}
   rpc GetRemoteObject(NodeObjectRef) returns (NodeObject) {}
+  rpc SyncObject(SyncRequest) returns (NodeObject) {}
 }
 
 // message RemoteResult {
@@ -36,6 +37,10 @@ message HelloReply {
   string message = 1;
 }
 
+message SyncRequest {
+  uint64 id = 1;
+}
+
 message NodeObjectRef {
   uint64 id = 1;
   string location = 2;
@@ -46,12 +51,14 @@ message CallArgs {
   ProtoPyTuple args = 1;
   ProtoPyDict kwargs = 2;
   repeated NodeObjectRef fetch_lists = 3;
+  repeated NodeObjectRef local_lists = 4;
 }
 
 message CreateRequest {
   string module = 1;
   string qualname = 2;
   CallArgs arg = 3;
+  bool async = 4;
 } 
 
 message InitRequest {
@@ -64,11 +71,13 @@ message CallRequest {
   uint64 object_id = 1;
   CallArgs arg = 2;
   repeated string attr = 3;
+  bool async = 4;
 }
 
 message ApplyRequest {
   bytes func = 1;
   CallArgs arg = 2;
+  bool async = 3;
 }
 
 message ConnectRequest {
@@ -86,11 +95,13 @@ message NodeObject {
   bytes exception = 3;
   string location = 4;
   string type = 5;
+  bool async = 6;
 }
 
 message GetAttrRequest {
   uint64 object_id = 1;
   repeated string attr = 2;
+  bool async = 3;
 }
 
 message Value {

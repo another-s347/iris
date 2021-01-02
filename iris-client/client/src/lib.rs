@@ -78,6 +78,7 @@ struct GuardedIrisObject {
     pub node_ref: NodeObject,
     pub time_cost: Duration,
     pub mem_ref: ClientMem,
+    pub r#async: bool
 }
 
 impl GuardedIrisObject {
@@ -110,6 +111,15 @@ impl GuardedIrisObject {
 
 impl Drop for GuardedIrisObject {
     fn drop(&mut self) {
+        // if !self.r#async {
+        //     let request = NodeObjectRef {
+        //         id: self.node_ref.id,
+        //         attr: vec![],
+        //         location: Default::default(),
+        //     };
+        //     // println!("drop object {}, type {}", self.node_ref.id, self.node_ref.r#type);
+        //     self._del(request)
+        // }
         let request = NodeObjectRef {
             id: self.node_ref.id,
             attr: vec![],
@@ -139,6 +149,7 @@ impl IrisObjectInternal {
         b_kwargs: Option<&PyDict>,
         attr: Option<Vec<String>>,
         pickle: &PyAny,
+        go_async: bool
     ) -> Option<IrisObjectInternal> {
         let arg = new_arg_request(
             b_args,
@@ -148,13 +159,14 @@ impl IrisObjectInternal {
             self.inner.node_ref.location.as_str(),
         );
 
-        py.allow_threads(|| self._call(arg, attr))
+        py.allow_threads(|| self._call(arg, attr, go_async))
     }
 
-    fn get_attr(&mut self, py: Python<'_>, attr: Vec<String>) -> Option<IrisObjectInternal> {
+    fn get_attr(&mut self, py: Python<'_>, attr: Vec<String>, go_async: bool) -> Option<IrisObjectInternal> {
         let request = GetAttrRequest {
             attr,
             object_id: self.inner.node_ref.id,
+            r#async:go_async
         };
         Some(py.allow_threads(|| self._get_attr(request)))
     }
@@ -229,6 +241,7 @@ impl IrisObjectInternal {
         &mut self,
         arg: Option<CallArgs>,
         attr: Option<Vec<String>>,
+        r#async: bool
     ) -> Option<IrisObjectInternal> {
         let start = Instant::now();
         let mut client = self.inner.client.clone();
@@ -239,6 +252,7 @@ impl IrisObjectInternal {
                 object_id: self.inner.node_ref.id,
                 arg,
                 attr: attr.unwrap_or_default(),
+                r#async
             })));
         let node_ref = task_handle.unwrap().into_inner();
         Some(IrisObjectInternal {
@@ -248,12 +262,14 @@ impl IrisObjectInternal {
                 node_ref,
                 time_cost: Instant::now() - start,
                 mem_ref: self.inner.mem_ref.clone(),
+                r#async
             }),
         })
     }
 
     fn _get_attr(&mut self, request: GetAttrRequest) -> IrisObjectInternal {
         let start = Instant::now();
+        let a = request.r#async;
         let mut client = self.inner.client.clone();
         let task_handle = self
             .inner
@@ -267,14 +283,27 @@ impl IrisObjectInternal {
                 node_ref: task_handle.map(|x| x.into_inner()).unwrap(),
                 time_cost: Instant::now() - start,
                 mem_ref: self.inner.mem_ref.clone(),
+                r#async: a
             }),
         }
+    }
+
+    fn _sync(&mut self) {
+        let start = Instant::now();
+        let mut client = self.inner.client.clone();
+        let task_handle = self
+            .inner
+            .runtime_handle
+            .block_on(client.sync_object(tonic::Request::new(SyncRequest {
+                id: self.id().id
+            })));
     }
 }
 
 impl IrisClientInternal {
     fn _create_object(&mut self, request: CreateRequest) -> IrisObjectInternal {
         let start = Instant::now();
+        let a = request.r#async;
         let task_handle = self
             .runtime_handle
             .block_on(self.client.create_object(tonic::Request::new(request)));
@@ -286,6 +315,7 @@ impl IrisClientInternal {
                 node_ref,
                 time_cost: Instant::now() - start,
                 mem_ref: self.mem.clone(),
+                r#async: a
             }),
         }
     }
@@ -320,6 +350,7 @@ impl IrisClientInternal {
 
     fn _apply(&mut self, request: ApplyRequest) -> IrisObjectInternal {
         let start = Instant::now();
+        let a = request.r#async;
         let task_handle = self
             .runtime_handle
             .block_on(self.client.apply(tonic::Request::new(request)));
@@ -331,6 +362,7 @@ impl IrisClientInternal {
                 node_ref,
                 time_cost: Instant::now() - start,
                 mem_ref: self.mem.clone(),
+                r#async: a
             }),
         }
     }
@@ -379,6 +411,7 @@ impl IrisClientInternal {
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
         pickle: &PyAny,
+        go_async: bool,
     ) -> IrisObjectInternal {
         let arg = new_arg_request(
             b_args,
@@ -387,7 +420,7 @@ impl IrisClientInternal {
             &pickle.to_object(py),
             self.node.as_str(),
         );
-        let request = ApplyRequest { arg, func };
+        let request = ApplyRequest { arg, func, r#async:go_async };
         py.allow_threads(|| self._apply(request))
     }
 
@@ -418,6 +451,7 @@ impl IrisClientInternal {
                 node_ref,
                 time_cost: Instant::now() - start,
                 mem_ref: self.mem.clone(),
+                r#async: false
             }),
         }
     }
@@ -430,6 +464,7 @@ impl IrisClientInternal {
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
         pickle: &PyAny,
+        go_async: bool
     ) -> PyResult<IrisObjectInternal> {
         let arg = new_arg_request(
             b_args,
@@ -442,6 +477,7 @@ impl IrisClientInternal {
             module: module.to_owned(),
             qualname: qualname.to_owned(),
             arg: arg,
+            r#async: go_async
         };
         Ok(py.allow_threads(|| self._create_object(request)))
     }
@@ -600,32 +636,36 @@ fn new_arg_request(
     match (b_args, b_kwargs) {
         (None, None) => None,
         (Some(args), None) => {
-            let (tuple, f) = tuple_to_proto(&args, py, pickle, current_location);
+            let (tuple, f, l) = tuple_to_proto(&args, py, pickle, current_location);
             Some(CallArgs {
                 args: Some(tuple),
                 kwargs: None,
                 // recursive: recursive.unwrap_or_default(),
                 fetch_lists: f,
+                local_lists: l
             })
         }
         (None, Some(kwargs)) => {
-            let (dict, f) = dict_to_proto(&kwargs, py, pickle, current_location);
+            let (dict, f, l) = dict_to_proto(&kwargs, py, pickle, current_location);
             Some(CallArgs {
                 args: None,
                 kwargs: Some(dict),
                 // recursive: recursive.unwrap_or_default(),
                 fetch_lists: f,
+                local_lists: l
             })
         }
         (Some(args), Some(kwargs)) => {
-            let (dict, mut f) = dict_to_proto(&kwargs, py, pickle, current_location);
-            let (tuple, mut f2) = tuple_to_proto(&args, py, pickle, current_location);
+            let (dict, mut f, mut l) = dict_to_proto(&kwargs, py, pickle, current_location);
+            let (tuple, mut f2, mut l2) = tuple_to_proto(&args, py, pickle, current_location);
             f2.append(&mut f);
+            l2.append(&mut l);
             Some(CallArgs {
                 args: Some(tuple),
                 kwargs: Some(dict),
                 // recursive: recursive.unwrap_or_default(),
                 fetch_lists: f2,
+                local_lists: l2
             })
         }
     }
@@ -636,15 +676,16 @@ fn tuple_to_proto(
     py: Python<'_>,
     pickle: &PyObject,
     current_location: &str,
-) -> (ProtoPyTuple, Vec<NodeObjectRef>) {
+) -> (ProtoPyTuple, Vec<NodeObjectRef>, Vec<NodeObjectRef>) {
     let mut vec = vec![];
     let mut fetch_list = vec![];
+    let mut local_list = vec![];
     for a in arg.iter() {
         if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Boolean(x));
-        } else if let Ok(true) = py.is_instance::<pyo3::types::PyFloat, _>(a) {
+        } else if let Ok(true) = a.is_instance::<pyo3::types::PyFloat>() {
             vec.push(proto_py_any::Data::F32(a.extract().unwrap()));
-        } else if let Ok(true) = py.is_instance::<pyo3::types::PyInt, _>(a) {
+        } else if let Ok(true) = a.is_instance::<pyo3::types::PyInt>() {
             vec.push(proto_py_any::Data::I64(a.extract().unwrap()));
         } else if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Str(x));
@@ -655,6 +696,13 @@ fn tuple_to_proto(
                     location: x.location.clone(),
                     attr: x.attr.clone(),
                 });
+            }
+            else {
+                local_list.push(NodeObjectRef {
+                    id: x.id,
+                    location: x.location.clone(),
+                    attr: x.attr.clone(),
+                })
             }
             vec.push(proto_py_any::Data::ObjectId(NodeObjectRef {
                 id: x.id,
@@ -669,12 +717,14 @@ fn tuple_to_proto(
                 current_location,
             )))
         } else if let Ok(tuple) = a.cast_as() {
-            let (tuple, mut f) = tuple_to_proto(tuple, py, pickle, current_location);
+            let (tuple, mut f, mut l) = tuple_to_proto(tuple, py, pickle, current_location);
             fetch_list.append(&mut f);
+            local_list.append(&mut l);
             vec.push(proto_py_any::Data::Tuple(tuple));
         } else if let Ok(dict) = a.cast_as() {
-            let (dict, mut f) = dict_to_proto(dict, py, pickle, current_location);
+            let (dict, mut f, mut l) = dict_to_proto(dict, py, pickle, current_location);
             fetch_list.append(&mut f);
+            local_list.append(&mut l);
             vec.push(proto_py_any::Data::Dict(dict));
         } else {
             let bytes = serialize(pickle, py, a).unwrap();
@@ -689,6 +739,7 @@ fn tuple_to_proto(
                 .collect(),
         },
         fetch_list,
+        local_list
     )
 }
 
@@ -700,6 +751,7 @@ fn list_to_proto(
 ) -> ProtoPyList {
     let mut vec = vec![];
     let mut fetch_list = vec![];
+    let mut local_list = vec![];
     for a in arg.iter() {
         if let Ok(x) = a.extract() {
             vec.push(proto_py_any::Data::Boolean(x));
@@ -721,6 +773,12 @@ fn list_to_proto(
                     location: x.location.clone(),
                     attr: x.attr,
                 });
+            } else {
+                local_list.push(NodeObjectRef {
+                    id: x.id,
+                    location: x.location.clone(),
+                    attr: x.attr.clone(),
+                })
             }
         } else if let Ok(list) = a.cast_as() {
             vec.push(proto_py_any::Data::List(list_to_proto(
@@ -730,12 +788,14 @@ fn list_to_proto(
                 current_location,
             )));
         } else if let Ok(tuple) = a.cast_as() {
-            let (tuple, mut f) = tuple_to_proto(tuple, py, pickle, current_location);
+            let (tuple, mut f, mut l) = tuple_to_proto(tuple, py, pickle, current_location);
             fetch_list.append(&mut f);
+            local_list.append(&mut l);
             vec.push(proto_py_any::Data::Tuple(tuple));
         } else if let Ok(dict) = a.cast_as() {
-            let (dict, mut f) = dict_to_proto(dict, py, pickle, current_location);
+            let (dict, mut f, mut l) = dict_to_proto(dict, py, pickle, current_location);
             fetch_list.append(&mut f);
+            local_list.append(&mut l);
             vec.push(proto_py_any::Data::Dict(dict));
         } else {
             let bytes = serialize(pickle, py, a).unwrap();
@@ -755,9 +815,10 @@ fn dict_to_proto(
     py: Python<'_>,
     pickle: &PyObject,
     current_location: &str,
-) -> (ProtoPyDict, Vec<NodeObjectRef>) {
+) -> (ProtoPyDict, Vec<NodeObjectRef>, Vec<NodeObjectRef>) {
     let mut vec = HashMap::new();
     let mut fetch_list = vec![];
+    let mut local_list = vec![];
     for (key, a) in arg.iter() {
         let key: String = key.extract().unwrap();
         if let Ok(x) = a.extract() {
@@ -796,6 +857,12 @@ fn dict_to_proto(
                     location: x.location.clone(),
                     attr: x.attr.clone(),
                 });
+            } else {
+                local_list.push(NodeObjectRef {
+                    id: x.id,
+                    location: x.location.clone(),
+                    attr: x.attr.clone(),
+                })
             }
             vec.insert(
                 key,
@@ -820,8 +887,9 @@ fn dict_to_proto(
                 },
             );
         } else if let Ok(tuple) = a.cast_as() {
-            let (tuple, mut f) = tuple_to_proto(tuple, py, pickle, current_location);
+            let (tuple, mut f, mut l) = tuple_to_proto(tuple, py, pickle, current_location);
             fetch_list.append(&mut f);
+            local_list.append(&mut l);
             vec.insert(
                 key,
                 ProtoPyAny {
@@ -829,8 +897,9 @@ fn dict_to_proto(
                 },
             );
         } else if let Ok(dict) = a.cast_as() {
-            let (dict, mut f) = dict_to_proto(dict, py, pickle, current_location);
+            let (dict, mut f, mut l) = dict_to_proto(dict, py, pickle, current_location);
             fetch_list.append(&mut f);
+            local_list.append(&mut l);
             vec.insert(
                 key,
                 ProtoPyAny {
@@ -847,7 +916,7 @@ fn dict_to_proto(
             );
         }
     }
-    (ProtoPyDict { map: vec }, fetch_list)
+    (ProtoPyDict { map: vec }, fetch_list, local_list)
 }
 
 fn serialize<T>(pickle: &PyObject, py: Python<'_>, err: T) -> PyResult<Vec<u8>>
@@ -891,6 +960,7 @@ fn tuple_to_obj(
                         },
                         time_cost: Duration::default(),
                         mem_ref: src.inner.mem_ref.clone(),
+                        r#async: src.inner.r#async
                     }),
                 }
                 .into_py(py),

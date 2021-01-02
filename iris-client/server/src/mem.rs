@@ -1,11 +1,15 @@
 use dashmap::DashMap;
+use prost::bytes::Bytes;
 use pyo3::prelude::*;
+use tracing::{debug, info};
 use std::{hash::{Hash, Hasher}, sync::atomic::Ordering};
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     sync::Arc,
 };
 use waitmap::WaitMap;
+
+use crate::utils::loads;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Key(pub u64);
@@ -16,9 +20,8 @@ impl From<&Key> for Key {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct MemCell {
-    pub item: Py<PyAny>,
+    pub item: LazyPyObject,
     pub remote: Option<String>,
 }
 #[derive(Clone)]
@@ -27,6 +30,47 @@ pub struct Mem {
     in_ref: Arc<DashMap<Key, u64>>,
     out_ref: Arc<DashMap<Key, Vec<String>>>,
     balance: Arc<std::sync::atomic::AtomicI64>
+}
+
+#[derive(Clone)]
+pub struct LazyPyObject {
+    object: once_cell::sync::OnceCell<PyObject>,
+    inner: LazyPyObjectInner
+}
+
+impl LazyPyObject {
+    pub fn new_object(object: PyObject) -> Self {
+        Self {
+            object: once_cell::sync::OnceCell::new(),
+            inner: LazyPyObjectInner::PyObject(object)
+        }
+    }
+
+    pub fn new_serialized(bytes: Bytes) -> Self {
+        Self {
+            object: once_cell::sync::OnceCell::new(),
+            inner: LazyPyObjectInner::Serialized(bytes)
+        }
+    }
+
+    pub fn get(&self, pickle: &PyObject, py: Python<'_>) -> PyResult<PyObject> {
+        self.object.get_or_try_init(||{
+            match &self.inner {
+                LazyPyObjectInner::Serialized(bytes) => {
+                    loads(pickle, py, bytes.as_ref())
+                }
+                LazyPyObjectInner::PyObject(object) => {
+                    Ok(object.clone())
+                }
+            }
+        }).map(|x|x.clone())
+    }
+}
+
+#[derive(Clone)]
+enum LazyPyObjectInner {
+    Serialized(Bytes),
+    PyObject(PyObject),
 }
 
 impl Default for Mem {
@@ -41,15 +85,18 @@ impl Default for Mem {
 }
 
 impl Mem {
-    pub fn insert(&self, item: Py<PyAny>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        let id = uuid::Uuid::new_v4();
-        id.hash(&mut hasher);
-        let id = hasher.finish();
-
+    pub fn insert(&self, id:Option<u64>, item: LazyPyObject) -> u64 {
+        let id = if let Some(i) = id {
+            i
+        } else {
+            let mut hasher = DefaultHasher::new();
+            let id = uuid::Uuid::new_v4();
+            id.hash(&mut hasher);
+            hasher.finish()
+        };
         self.objects.insert(Key(id), MemCell { item, remote: None });
         let b = self.balance.fetch_add(1, Ordering::SeqCst);
-        println!("object balance: {}", b);
+        debug!("object balance: {}", b);
 
         id
     }
@@ -72,24 +119,55 @@ impl Mem {
         }
     }
 
-    pub async fn get(&self, id: u64) -> Option<Py<PyAny>> {
+    pub async fn get(&self, id: u64) -> Option<LazyPyObject> {
         // let start = std::time::Instant::now();
         let result = self.objects.wait(&Key(id)).await.map(|x| x.value().item.clone());
         // println!("get wait {:?} s",std::time::Instant::now().duration_since(start).as_secs_f64());
         result
     }
 
-    pub fn del(&self, id: u64) -> Option<Vec<String>> {
-        self.objects.cancel(&Key(id));
-        self.balance.fetch_sub(1, Ordering::SeqCst);
-        self.out_ref.remove_take(&Key(id)).map(|x| x.value().clone())
+    pub fn get_sync(&self, id: u64) -> Option<LazyPyObject> {
+        // let start = std::time::Instant::now();
+        let result = self.objects.get(&Key(id)).map(|x| x.value().item.clone());
+        // println!("get wait {:?} s",std::time::Instant::now().duration_since(start).as_secs_f64());
+        result
+    }
+
+    pub async fn get_exist(&self, id: u64) -> Option<LazyPyObject> {
+        if self.objects.have(&Key(id)) {
+            // let start = std::time::Instant::now();
+            let result = self.objects.wait(&Key(id)).await.map(|x| x.value().item.clone());
+            // println!("get wait {:?} s",std::time::Instant::now().duration_since(start).as_secs_f64());
+            result
+        }
+        else {
+            None
+        }
+    }
+
+    pub async fn del(&self, id: u64) -> Option<Vec<String>> {
+        debug!("del object {}", id);
+        if self.objects.have(&Key(id)) {
+            self.objects.wait(&Key(id)).await;
+            self.objects.cancel(&Key(id));
+            self.balance.fetch_sub(1, Ordering::SeqCst);
+            self.out_ref.remove_take(&Key(id)).map(|x| x.value().clone())
+        }
+        else {
+            None
+        }
     }
 
     pub fn del_remote(&self, id: u64) {
+        debug!("del remote object {}", id);
         if let Some(id) = self.in_ref.remove_take(&Key(id)) {
             let id = id.value();
             self.objects.cancel(&Key(*id));
             self.balance.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+
+    pub fn reg(&self, id:u64) {
+        self.objects.reg(&Key(id));
     }
 }

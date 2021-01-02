@@ -6,11 +6,16 @@ from torch import optim
 import asyncio
 import traceback
 
-class IrisContext:
+class IrisConfig:
     def __init__(self):
+        self.go_async = True
+
+class IrisContext:
+    def __init__(self, config = None):
         super().__init__()
         self.inner = IrisContextInternal()
         self.client_wrapper = {}
+        self.config = config if config else IrisConfig()
 
     def setup(self):
         self.client_wrapper["node0"] = IrisClientWrapper(self.inner.connect(
@@ -69,13 +74,14 @@ class IrisObject:
             b_kwargs=kwargs,
             pickle=dill,
             attr=self.attrs,
+            go_async=self.ctx.config.go_async
         )
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
         return IrisObject(r, self.node, self.ctx, args, kwargs)
 
-    def _call_with_attr(self, attr, args, kwargs={}):
+    def _call_with_attr(self, attr, go_async, args, kwargs={}):
         if self.value:
             if args == None:
                 return getattr(self.value, attr)()
@@ -84,7 +90,8 @@ class IrisObject:
         r = self.inner.call(
             b_args=r_args,
             b_kwargs=kwargs,
-            attr=[*self.attrs,attr], pickle=dill
+            attr=[*self.attrs,attr], pickle=dill,
+            go_async=go_async
         )
         if r.exception():
             exception = dill.loads(r.exception())
@@ -92,7 +99,7 @@ class IrisObject:
         return IrisObject(r, self.node, self.ctx, args, kwargs)
 
     def keys(self):
-        return self._call_with_attr('keys', args=None)
+        return self._call_with_attr('keys', go_async=self.ctx.config.go_async, args=None)
 
     def to_node(self, node):
         return self.ctx.client_wrapper[node].get_remote_object(self)
@@ -100,7 +107,7 @@ class IrisObject:
     def __getattr__(self, attr):
         # TODO: add options
         if False:
-            r = self.inner.get_attr([attr])
+            r = self.inner.get_attr([attr],go_attr=True)
             if r.exception():
                 exception = dill.loads(r.exception())
                 raise exception
@@ -109,46 +116,69 @@ class IrisObject:
             return IrisObject(self.inner, self.node, self.ctx, None, None, [*self.attrs, attr])
 
     def __add__(self, other):
-        return self._call_with_attr('__add__', args=(other,))
+        return self._call_with_attr('__add__',go_async=self.ctx.config.go_async, args=(other,))
 
     def __sub__(self, other):
-        return self._call_with_attr('__sub__', args=(other,))
+        return self._call_with_attr('__sub__',go_async=self.ctx.config.go_async, args=(other,))
 
     def __mul__(self, other):
-        return self._call_with_attr('__mul__', args=(other,))
+        return self._call_with_attr('__mul__',go_async=self.ctx.config.go_async, args=(other,))
 
     def __div__(self, other):
-        return self._call_with_attr('__div__', args=(other,))
+        return self._call_with_attr('__div__',go_async=self.ctx.config.go_async, args=(other,))
     # TODO: Add more magic methods
 
     def __len__(self):
-        return self._call_with_attr('__len__', args=None)
+        return self._call_with_attr('__len__',go_async=self.ctx.config.go_async, args=None)
 
     def __iter__(self):
-        return self._call_with_attr('__iter__', args=None)
+        return self._call_with_attr('__iter__',go_async=self.ctx.config.go_async, args=None)
+        # return AsyncIterator(self._call_with_attr('__iter__',go_async=self.ctx.config.go_async, args=None))
 
     def __getitem__(self, key):
-        return self._call_with_attr('__getitem__', args=(key,))
+        return self._call_with_attr('__getitem__',go_async=self.ctx.config.go_async, args=(key,))
 
     def __setitem__(self, key, value):
-        return self._call_with_attr('__setitem__', args=(key, value,))
+        return self._call_with_attr('__setitem__',go_async=self.ctx.config.go_async, args=(key, value,))
 
     def __delitem__(self, key):
-        return self._call_with_attr('__delitem__', args=(key,))
+        return self._call_with_attr('__delitem__',go_async=self.ctx.config.go_async, args=(key,))
 
     def __reversed__(self):
-        return self._call_with_attr('__reversed__', args=None)
+        return self._call_with_attr('__reversed__',go_async=self.ctx.config.go_async, args=None)
 
     def __contains__(self, item):
-        return self._call_with_attr('__contains__', args=(item,))
+        return self._call_with_attr('__contains__',go_async=self.ctx.config.go_async, args=(item,))
 
     def __next__(self):
-        return self._call_with_attr('__next__', args=None)
+        return self._call_with_attr('__next__',go_async=False, args=None)
 
     def __index__(self):
         if self.value:
             return getattr(self.value, '__index__')()
-        return self._call_with_attr('__index__', args=None).get()
+        return self._call_with_attr('__index__',go_async=self.ctx.config.go_async, args=None).get()
+
+class AsyncIterator:
+    def __init__(self, inner):
+        self.inner = inner
+        self.current = 0
+        try:
+            self.len = inner._call_with_attr('__len__',go_async=False, args=None).value
+        except AttributeError:
+            self.len = None
+    
+    def __len__(self):
+        return self.len
+
+    def __next__(self):
+        if self.len is None:
+            return self.inner._call_with_attr('__next__',go_async=self.inner.ctx.config.go_async, args=None)
+        else:
+            self.current += 1
+            if self.current >= self.len:
+                return self.inner._call_with_attr('__next__',go_async=False, args=None)
+            else:
+                return self.inner._call_with_attr('__next__',go_async=self.inner.ctx.config.go_async, args=None)
 
 
 class RemoteTensorGroup:
@@ -270,7 +300,8 @@ class IrisClientWrapper:
             qualname=module.__qualname__,
             b_args=r_args,
             b_kwargs=kwargs,
-            pickle=dill
+            pickle=dill,
+            go_async=True,
         )
         if r.exception():
             exception = dill.loads(r.exception())
@@ -284,7 +315,8 @@ class IrisClientWrapper:
             func=dill.dumps(func),
             b_args=r_args,
             b_kwargs=kwargs,
-            pickle=dill
+            pickle=dill,
+            go_async=True
         )
         if r.exception():
             exception = dill.loads(r.exception())
@@ -294,6 +326,7 @@ class IrisClientWrapper:
     def get_remote_object(self, obj):
         r = self.inner.get_remote_object(obj.inner)
         return IrisObject(r, self.node, self.ctx, None, None)
+
 
 
 def retrieve_args(self, node, ctx, args, cls=tuple):
