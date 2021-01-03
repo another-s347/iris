@@ -58,7 +58,7 @@ message CreateRequest {
   string module = 1;
   string qualname = 2;
   CallArgs arg = 3;
-  bool async = 4;
+  RequestOption options = 4;
 } 
 
 message InitRequest {
@@ -71,13 +71,14 @@ message CallRequest {
   uint64 object_id = 1;
   CallArgs arg = 2;
   repeated string attr = 3;
-  bool async = 4;
+  RequestOption options = 4;
+
 }
 
 message ApplyRequest {
   bytes func = 1;
   CallArgs arg = 2;
-  bool async = 3;
+  RequestOption options = 3;
 }
 
 message ConnectRequest {
@@ -101,7 +102,7 @@ message NodeObject {
 message GetAttrRequest {
   uint64 object_id = 1;
   repeated string attr = 2;
-  bool async = 3;
+  RequestOption options = 3;
 }
 
 message Value {
@@ -135,4 +136,9 @@ message ProtoPyList {
 
 message ProtoPyDict {
   map<string, ProtoPyAny> map = 3;
+}
+
+message RequestOption {
+  bool async = 1;
+  repeated NodeObjectRef after = 2;
 }

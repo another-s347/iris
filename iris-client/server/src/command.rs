@@ -1,5 +1,6 @@
 use std::{collections::{HashMap, hash_map::DefaultHasher}, hash::{Hash, Hasher}, sync::Arc};
 
+use after::After;
 use anyhow::anyhow;
 use args::PrepareArgsResult;
 use dashmap::DashMap;
@@ -8,7 +9,7 @@ use proto::n2n;
 use pyo3::{Py, PyAny, PyObject, PyResult, Python, types::{PyModule, PyTuple}};
 use tokio::task::JoinHandle;
 use tonic::{Request,Response};
-use tracing::{debug, info, span, warn};
+use tracing::{Instrument, debug, info, span, warn};
 use crate::{Opt, command_server::IrisServer, distributed, hello_world::{greeter_server::Greeter, *}, mem::LazyPyObject, utils::LocalObject};
 use futures::FutureExt;
 
@@ -19,6 +20,7 @@ pub mod create_object;
 pub mod get_attr;
 pub mod args;
 pub mod apply;
+pub mod after;
 pub enum CommandTarget {
     Object(u64),
     Module(String),
@@ -27,8 +29,18 @@ pub enum CommandTarget {
 
 pub trait ControlCommandRequest:Send + 'static {
     fn get_target_object(&self) -> CommandTarget;
-    fn get_async(&self) -> bool;
+    fn get_option(&self) -> Option<&RequestOption>;
     fn get_args(&self) -> Option<CallArgs>;
+}
+
+pub trait RequestExt {
+    fn get_async(&self) -> bool;
+}
+
+impl<T> RequestExt for T where T:ControlCommandRequest {
+    fn get_async(&self) -> bool {
+        self.get_option().map(|x|x.r#async).unwrap_or(false)
+    }
 }
 
 pub trait ControlCommand {
@@ -64,15 +76,12 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
 
     pub async fn run(self, server: &IrisServer) -> crate::error::Result<NodeObject> 
     where <T as ControlCommand>::Request: Sync {
+        let id = self.id;
         if self.go_async {
-            let span = span!(tracing::Level::INFO, "AsyncCommand", cmd=T::NAME, id=self.id);
-            let _g = span.enter();
             self.run_async(&server.objects, server.nodes.clone(), server.pickle.clone(), &server.current_node, server.modules.clone()).await
         }
         else {
-            let span = span!(tracing::Level::INFO, "SyncCommand", cmd=T::NAME, id=self.id);
-            let _g = span.enter();
-            self.run_sync(&server.objects, &server.nodes, server.pickle.clone(), &server.current_node, &server.modules).await
+            self.run_sync(&server.objects, &server.nodes, server.pickle.clone(), &server.current_node, &server.modules).instrument(span!(tracing::Level::INFO, "SyncCommand", cmd=T::NAME, id=id)).await
         }
     }
 
@@ -95,6 +104,18 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         };
 
         let task:JoinHandle<crate::error::Result<()>> = tokio::spawn(async move {
+            match request.get_option().map(|x|&x.after) {
+                Some(after_list) => {
+                    After {
+                        objects: after_list,
+                        mem: &mem,
+                        nodes: nodes.as_ref(),
+                        current_node: current_node.as_ref(),
+                    }.wait().await?;
+                }
+                None => {}
+            };
+
             let result = if let Some(args) = request.get_args() {
                 Some(PrepareArgs {
                     args,
@@ -154,7 +175,7 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         });
 
         tokio::spawn(async move {
-            match task.await {
+            match task.instrument(span!(tracing::Level::INFO, "AsyncCommand", cmd=T::NAME, id=id)).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => {
                     warn!(target=id, "{:#?}", err);

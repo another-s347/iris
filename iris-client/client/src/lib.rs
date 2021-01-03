@@ -149,8 +149,9 @@ impl IrisObjectInternal {
         b_kwargs: Option<&PyDict>,
         attr: Option<Vec<String>>,
         pickle: &PyAny,
-        go_async: bool
-    ) -> Option<IrisObjectInternal> {
+        go_async: bool,
+        after_list: Option<&PyList>
+    ) -> PyResult<IrisObjectInternal> {
         let arg = new_arg_request(
             b_args,
             b_kwargs,
@@ -159,16 +160,24 @@ impl IrisObjectInternal {
             self.inner.node_ref.location.as_str(),
         );
 
-        py.allow_threads(|| self._call(arg, attr, go_async))
+        let options = Some(RequestOption {
+            r#async:go_async,
+            after: list_to_after_list(after_list, py)?
+        });
+
+        py.allow_threads(|| self._call(arg, attr, options))
     }
 
-    fn get_attr(&mut self, py: Python<'_>, attr: Vec<String>, go_async: bool) -> Option<IrisObjectInternal> {
+    fn get_attr(&mut self, py: Python<'_>, attr: Vec<String>, go_async: bool, after_list: Option<&PyList>) -> PyResult<IrisObjectInternal> {
         let request = GetAttrRequest {
             attr,
             object_id: self.inner.node_ref.id,
-            r#async:go_async
+            options: Some(RequestOption {
+                r#async:go_async,
+                after: list_to_after_list(after_list, py)?
+            })
         };
-        Some(py.allow_threads(|| self._get_attr(request)))
+        Ok(py.allow_threads(|| self._get_attr(request)))
     }
 
     fn id(&self) -> IrisObjectId {
@@ -241,9 +250,10 @@ impl IrisObjectInternal {
         &mut self,
         arg: Option<CallArgs>,
         attr: Option<Vec<String>>,
-        r#async: bool
-    ) -> Option<IrisObjectInternal> {
+        options: Option<RequestOption>
+    ) -> PyResult<IrisObjectInternal> {
         let start = Instant::now();
+        let r#async = options.as_ref().map(|x|x.r#async).unwrap_or(false);
         let mut client = self.inner.client.clone();
         let task_handle = self
             .inner
@@ -252,10 +262,10 @@ impl IrisObjectInternal {
                 object_id: self.inner.node_ref.id,
                 arg,
                 attr: attr.unwrap_or_default(),
-                r#async
+                options
             })));
         let node_ref = task_handle.unwrap().into_inner();
-        Some(IrisObjectInternal {
+        Ok(IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.inner.runtime_handle.clone(),
                 client,
@@ -269,7 +279,7 @@ impl IrisObjectInternal {
 
     fn _get_attr(&mut self, request: GetAttrRequest) -> IrisObjectInternal {
         let start = Instant::now();
-        let a = request.r#async;
+        let a = request.options.as_ref().map(|x|x.r#async).unwrap_or(false);
         let mut client = self.inner.client.clone();
         let task_handle = self
             .inner
@@ -303,7 +313,7 @@ impl IrisObjectInternal {
 impl IrisClientInternal {
     fn _create_object(&mut self, request: CreateRequest) -> IrisObjectInternal {
         let start = Instant::now();
-        let a = request.r#async;
+        let a = request.options.as_ref().map(|x|x.r#async).unwrap_or(false);
         let task_handle = self
             .runtime_handle
             .block_on(self.client.create_object(tonic::Request::new(request)));
@@ -350,7 +360,7 @@ impl IrisClientInternal {
 
     fn _apply(&mut self, request: ApplyRequest) -> IrisObjectInternal {
         let start = Instant::now();
-        let a = request.r#async;
+        let a = request.options.as_ref().map(|x|x.r#async).unwrap_or(false);
         let task_handle = self
             .runtime_handle
             .block_on(self.client.apply(tonic::Request::new(request)));
@@ -412,7 +422,8 @@ impl IrisClientInternal {
         b_kwargs: Option<&PyDict>,
         pickle: &PyAny,
         go_async: bool,
-    ) -> IrisObjectInternal {
+        after_list: Option<&PyList>
+    ) -> PyResult<IrisObjectInternal> {
         let arg = new_arg_request(
             b_args,
             b_kwargs,
@@ -420,8 +431,12 @@ impl IrisClientInternal {
             &pickle.to_object(py),
             self.node.as_str(),
         );
-        let request = ApplyRequest { arg, func, r#async:go_async };
-        py.allow_threads(|| self._apply(request))
+        let options = Some(RequestOption {
+            r#async:go_async,
+            after: list_to_after_list(after_list, py)?
+        });
+        let request = ApplyRequest { arg, func, options };
+        Ok(py.allow_threads(|| self._apply(request)))
     }
 
     fn get_remote_object(
@@ -464,7 +479,8 @@ impl IrisClientInternal {
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
         pickle: &PyAny,
-        go_async: bool
+        go_async: bool,
+        after_list: Option<&PyList>
     ) -> PyResult<IrisObjectInternal> {
         let arg = new_arg_request(
             b_args,
@@ -473,11 +489,15 @@ impl IrisClientInternal {
             &pickle.to_object(py),
             self.node.as_str(),
         );
+        let options = Some(RequestOption {
+            r#async:go_async,
+            after: list_to_after_list(after_list, py)?
+        });
         let request = CreateRequest {
             module: module.to_owned(),
             qualname: qualname.to_owned(),
             arg: arg,
-            r#async: go_async
+            options
         };
         Ok(py.allow_threads(|| self._create_object(request)))
     }
@@ -741,6 +761,27 @@ fn tuple_to_proto(
         fetch_list,
         local_list
     )
+}
+
+fn list_to_after_list(
+    arg: Option<&PyList>,
+    py: Python<'_>,
+) -> PyResult<Vec<NodeObjectRef>> {
+    let arg = if let Some(x) = arg {
+        x
+    } else {
+        return Ok(vec![]);
+    };
+    let mut list = vec![];
+    for a in arg {
+        let x = a.extract::<common::IrisObjectId>()?;
+        list.push(NodeObjectRef {
+            id: x.id,
+            location: x.location.clone(),
+            attr: vec![]
+        });
+    }
+    Ok(list)
 }
 
 fn list_to_proto(

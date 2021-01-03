@@ -108,12 +108,8 @@ impl Mem {
     }
 
     pub fn insert_out_ref(&self, id: u64, node: String) {
-        if self.out_ref.contains_key(&Key(id)) {
-            self.out_ref.update(&Key(id), |_key, vec| {
-                let mut v = vec.clone();
-                v.push(node.clone());
-                v
-            });
+        if let Some(mut x) = self.out_ref.get_mut(&Key(id)) {
+            x.push(node);
         } else {
             self.out_ref.insert(Key(id), vec![node]);
         }
@@ -151,7 +147,7 @@ impl Mem {
             self.objects.wait(&Key(id)).await;
             self.objects.cancel(&Key(id));
             self.balance.fetch_sub(1, Ordering::SeqCst);
-            self.out_ref.remove_take(&Key(id)).map(|x| x.value().clone())
+            self.out_ref.remove(&Key(id)).map(|(_,x)| x.clone())
         }
         else {
             None
@@ -160,14 +156,9 @@ impl Mem {
 
     pub fn del_remote(&self, id: u64) {
         debug!("del remote object {}", id);
-        if let Some(id) = self.in_ref.remove_take(&Key(id)) {
-            let id = id.value();
-            self.objects.cancel(&Key(*id));
+        if let Some((_,id)) = self.in_ref.remove(&Key(id)) {
+            self.objects.cancel(&Key(id));
             self.balance.fetch_sub(1, Ordering::SeqCst);
         }
-    }
-
-    pub fn reg(&self, id:u64) {
-        self.objects.reg(&Key(id));
     }
 }

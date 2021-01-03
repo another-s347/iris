@@ -17,8 +17,8 @@ pub struct ApplyCommand {
 }
 
 impl super::ControlCommandRequest for ApplyRequest {
-    fn get_async(&self) -> bool {
-        self.r#async
+    fn get_option(&self) -> Option<&RequestOption> {
+        self.options.as_ref()
     }
 
     fn get_args(&self) -> Option<CallArgs> {

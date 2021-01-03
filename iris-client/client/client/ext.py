@@ -9,6 +9,7 @@ import traceback
 class IrisConfig:
     def __init__(self):
         self.go_async = True
+        self.go_async_sequence = True
 
 class IrisContext:
     def __init__(self, config = None):
@@ -16,6 +17,7 @@ class IrisContext:
         self.inner = IrisContextInternal()
         self.client_wrapper = {}
         self.config = config if config else IrisConfig()
+        self.last_task = None
 
     def setup(self):
         self.client_wrapper["node0"] = IrisClientWrapper(self.inner.connect(
@@ -74,8 +76,11 @@ class IrisObject:
             b_kwargs=kwargs,
             pickle=dill,
             attr=self.attrs,
-            go_async=self.ctx.config.go_async
+            go_async=self.ctx.config.go_async,
+            after_list = self.ctx.last_task
         )
+        if self.ctx.config.go_async_sequence:
+            self.ctx.last_task = [r.id()]
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
@@ -91,8 +96,11 @@ class IrisObject:
             b_args=r_args,
             b_kwargs=kwargs,
             attr=[*self.attrs,attr], pickle=dill,
-            go_async=go_async
+            go_async=go_async,
+            after_list = self.ctx.last_task
         )
+        if self.ctx.config.go_async_sequence:
+            self.ctx.last_task = [r.id()]
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
@@ -302,7 +310,10 @@ class IrisClientWrapper:
             b_kwargs=kwargs,
             pickle=dill,
             go_async=True,
+            after_list = self.ctx.last_task
         )
+        if self.ctx.config.go_async_sequence:
+            self.ctx.last_task = [r.id()]
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
@@ -316,8 +327,11 @@ class IrisClientWrapper:
             b_args=r_args,
             b_kwargs=kwargs,
             pickle=dill,
-            go_async=True
+            go_async=True,
+            after_list = self.ctx.last_task
         )
+        if self.ctx.config.go_async_sequence:
+            self.ctx.last_task = [r.id()]
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception

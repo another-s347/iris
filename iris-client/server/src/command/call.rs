@@ -18,8 +18,8 @@ pub struct CallCommand {
 }
 
 impl super::ControlCommandRequest for CallRequest {
-    fn get_async(&self) -> bool {
-        self.r#async
+    fn get_option(&self) -> Option<&RequestOption> {
+        self.options.as_ref()
     }
 
     fn get_args(&self) -> Option<CallArgs> {

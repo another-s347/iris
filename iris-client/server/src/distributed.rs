@@ -1,8 +1,5 @@
 use dashmap::DashMap;
-use n2n::{
-    n2n_client::N2nClient,
-    n2n_server::{N2n},
-};
+use n2n::{HelloReply, n2n_client::N2nClient, n2n_server::{N2n}};
 use proto::n2n;
 use pyo3::prelude::*;
 use pyo3::{prelude::PyModule, Py, PyAny, Python};
@@ -48,6 +45,19 @@ impl N2n for NodeServer {
         return Ok(Response::new(n2n::ObjectId {
             id: request.id
         }))
+    }
+    
+    async fn wait_object(
+        &self,
+        request: Request<n2n::NodeObjectRef>,
+    ) -> Result<Response<HelloReply>, tonic::Status> {
+        let request = request.into_inner();
+        info!("wait object {}", request.id);
+        let object = self.objects.get(request.id).await.unwrap();
+        info!("wait object {} done", request.id);
+        return Ok(Response::new(n2n::HelloReply {
+            message: "Ok".to_owned()
+        }));
     }
 
     async fn get_object(

@@ -13,6 +13,7 @@ service N2N {
   rpc Hello(HelloRequest) returns (HelloReply) {}
   rpc GetObject (NodeObjectRef) returns (Value) {}
   rpc DelObject (ObjectId) returns (ObjectId) {}
+  rpc WaitObject (NodeObjectRef) returns (HelloReply) {}
 }
 
 // The request message containing the user's name.

@@ -173,6 +173,7 @@ impl Greeter for IrisServer {
 
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<NodeObject>, Status> {
         let request: CallRequest = request.into_inner();
+        info!("receive call request {}", request.object_id);
         let result =
             crate::command::ControlCommandTask::<crate::command::call::CallCommand>::new(request)
                 .run(self)
@@ -272,6 +273,7 @@ impl Greeter for IrisServer {
         let start = std::time::Instant::now();
         let request = request.into_inner();
         let id = request.id;
+        info!("receive del request {}", id);
         let maps = &self.objects;
         if let Some(out_refs) = maps.del(request.id).await {
             for c in out_refs {

@@ -33,7 +33,7 @@ impl<'a> PrepareArgs<'a> {
             id.hash(&mut hasher);
             let id = hasher.finish();
             let obj = o.clone();
-            tokio::time::timeout(Duration::from_secs(2), node.get_object(tonic::Request::new(n2n::NodeObjectRef {
+            tokio::time::timeout(Duration::from_secs(20), node.get_object(tonic::Request::new(n2n::NodeObjectRef {
                 id: o.id,
                 attr: o.attr.clone(),
                 location: o.location.clone(),
@@ -54,7 +54,7 @@ impl<'a> PrepareArgs<'a> {
 
         let local_objects = local_list.iter().map(|x|{
             let id = x.id;
-            tokio::time::timeout(Duration::from_secs(2),self.mem.get(x.id)).map(move|r|(id, r))
+            tokio::time::timeout(Duration::from_secs(20),self.mem.get(x.id)).map(move|r|(id, r))
         });
         let mut local_objects:Vec<(u64, _)> = futures::future::join_all(local_objects).await;
 
