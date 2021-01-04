@@ -17,6 +17,8 @@ tower = "*"
 uuid = { version="0.8", features = ["v4"] }
 common = { path="../common" }
 proto = { path="../proto" }
+tracing = "0.1"
+tracing-subscriber = "0.2.15"
 
 [build-dependencies]
 tonic-build = "0.2"

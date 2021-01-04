@@ -171,33 +171,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn setup_global_subscriber(color:bool) {
-    let exporter = opentelemetry_jaeger::Exporter::builder()
-        .with_agent_endpoint("127.0.0.1:6831".parse().unwrap())
-        .with_process(opentelemetry_jaeger::Process {
-            service_name: "report_example".to_string(),
-            tags: Vec::new(),
-        })
-        .init()
-        .unwrap();
-    let provider = sdk::Provider::builder()
-        .with_simple_exporter(exporter)
-        .with_config(sdk::Config {
-            default_sampler: Box::new(sdk::Sampler::Always),
-            ..Default::default()
-        })
-        .build();
-    let tracer = provider.get_tracer("tracing");
-    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+fn setup_global_subscriber(color: bool) {
+    // let exporter = opentelemetry_jaeger::Exporter::builder()
+    //     .with_agent_endpoint("127.0.0.1:6831".parse().unwrap())
+    //     .with_process(opentelemetry_jaeger::Process {
+    //         service_name: "report_example".to_string(),
+    //         tags: Vec::new(),
+    //     })
+    //     .init()
+    //     .unwrap();
+    // let provider = sdk::Provider::builder()
+    //     .with_simple_exporter(exporter)
+    //     .with_config(sdk::Config {
+    //         default_sampler: Box::new(sdk::Sampler::Always),
+    //         ..Default::default()
+    //     })
+    //     .build();
+    // let tracer = provider.get_tracer("tracing");
+    // let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
     let filter = tracing_subscriber::filter::EnvFilter::new("server=trace,mio=info,hyper=info");
     let fmt_layer = fmt::Layer::default()
         .with_ansi(color)
         .with_timer(tracing_subscriber::fmt::time::SystemTime);
 
+    let file_layer = fmt::Layer::default()
+        .with_ansi(false)
+        .with_writer(|| tracing_appender::rolling::never(".", "prefix.log"));
+
     let subscriber = Registry::default()
         .with(filter)
         .with(fmt_layer)
-        .with(telemetry);
+        .with(file_layer);
 
     tracing::subscriber::set_global_default(subscriber).expect("Could not set global default");
 }

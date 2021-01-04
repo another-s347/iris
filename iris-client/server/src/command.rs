@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use prost::bytes::Bytes;
 use proto::n2n;
 use pyo3::{Py, PyAny, PyObject, PyResult, Python, types::{PyModule, PyTuple}};
-use tokio::task::JoinHandle;
+use tokio::{sync::oneshot::Sender, task::JoinHandle};
 use tonic::{Request,Response};
 use tracing::{Instrument, debug, info, span, warn};
 use crate::{Opt, command_server::IrisServer, distributed, hello_world::{greeter_server::Greeter, *}, mem::LazyPyObject, utils::LocalObject};
@@ -77,6 +77,7 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
     pub async fn run(self, server: &IrisServer) -> crate::error::Result<NodeObject> 
     where <T as ControlCommand>::Request: Sync {
         let id = self.id;
+        server.objects.reg(id);
         if self.go_async {
             self.run_async(&server.objects, server.nodes.clone(), server.pickle.clone(), &server.current_node, server.modules.clone()).await
         }
@@ -103,32 +104,58 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
             ..Default::default()
         };
 
-        let task:JoinHandle<crate::error::Result<()>> = tokio::spawn(async move {
-            match request.get_option().map(|x|&x.after) {
-                Some(after_list) => {
+        let task:JoinHandle<crate::error::Result<Vec<Sender<()>>>> = tokio::spawn(async move {
+            // get remote request and after request have to be sent together to avoid remote object deleted between them
+            let mut result = match (request.get_args(), request.get_option().map(|x|&x.after)) {
+                (Some(args), Some(after_list)) => {
+                    let r = PrepareArgs {
+                        args,
+                        mem: &mem,
+                        nodes: nodes.as_ref()
+                    }.prepare();
+                    let a = After {
+                        objects: after_list,
+                        mem: &mem,
+                        nodes: nodes.as_ref(),
+                        current_node: current_node.as_ref(),
+                    }.wait();
+                    let (a,b) = futures::join!(r, a);
+                    b?;
+                    Some(a?)
+                }
+                (Some(args), None) => {
+                    Some(PrepareArgs {
+                        args,
+                        mem: &mem,
+                        nodes: nodes.as_ref()
+                    }.prepare().await?)
+                }
+                (None, Some(after_list)) => {
                     After {
                         objects: after_list,
                         mem: &mem,
                         nodes: nodes.as_ref(),
                         current_node: current_node.as_ref(),
                     }.wait().await?;
+                    None
                 }
-                None => {}
+                (None, None) => {
+                    None
+                }
             };
 
-            let result = if let Some(args) = request.get_args() {
-                Some(PrepareArgs {
-                    args,
-                    mem: &mem,
-                    nodes: nodes.as_ref()
-                }.prepare().await?)
-            } else {
-                None
+            let mut guards = if let Some(x) = result.as_mut() {
+                std::mem::take(&mut x.guards)
+            }
+            else {
+                vec![]
             };
 
             let o= match request.get_target_object() {
                 CommandTarget::Object(id) => {
-                    Some(mem.get(id).await.ok_or(anyhow::anyhow!(format!("command target object {} not found", id)))?)
+                    let (w, s) = mem.get(id).await;
+                    guards.push(s);
+                    Some(w.ok_or(anyhow::anyhow!(format!("command target object {} not found", id)))?)
                 }
                 CommandTarget::Module(m) => {
                     Some(LazyPyObject::new_object(modules.get(&m).ok_or(anyhow::anyhow!(format!("command target module {} not found", id)))?.value().clone()))
@@ -171,26 +198,31 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
             }).await?;
             blocking_task?;
 
-            Ok(())
+            Ok(guards)
         });
 
         tokio::spawn(async move {
             match task.instrument(span!(tracing::Level::INFO, "AsyncCommand", cmd=T::NAME, id=id)).await {
-                Ok(Ok(_)) => {}
+                Ok(Ok(x)) => {
+                    for s in x {
+                        let _ = s.send(());
+                    }
+                }
                 Ok(Err(err)) => {
                     warn!(target=id, "{:#?}", err);
                 }
                 Err(err) => {
                     warn!(target=id, "JoinError {:#?}", err);
                 }
-            }
+            };
+            
         });
 
         Ok(ret)
     }
     
     pub async fn run_sync(self, mem:&crate::mem::Mem, nodes:&DashMap<String, distributed::DistributedClient>, pickle: PyObject, current_node: &str, modules: &Arc<DashMap<String, PyObject>>) -> crate::error::Result<NodeObject> {
-        let result = if let Some(args) = self.request.get_args() {
+        let mut result = if let Some(args) = self.request.get_args() {
             Some(PrepareArgs {
                 args,
                 mem,
@@ -200,9 +232,18 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
             None
         };
 
+        let mut guards = if let Some(x) = result.as_mut() {
+            std::mem::take(&mut x.guards)
+        }
+        else {
+            vec![]
+        };
+
         let o= match self.request.get_target_object() {
             CommandTarget::Object(id) => {
-                Some(mem.get(id).await.ok_or(anyhow::anyhow!(format!("command target object {} not found", id)))?)
+                let (obj, s) = mem.get(id).await;
+                guards.push(s);
+                Some(obj.ok_or(anyhow::anyhow!(format!("command target object {} not found", id)))?)
             }
             CommandTarget::Module(m) => {
                 Some(LazyPyObject::new_object(modules.get(&m).ok_or(anyhow::anyhow!(format!("command target module {} not found", m)))?.value().clone()))
@@ -216,7 +257,7 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         let id = self.id;
         
         let mem_c = mem.clone();
-        tokio::task::spawn_blocking(move || {
+        let r = tokio::task::spawn_blocking(move || {
             let gil = Python::acquire_gil();
             let py = gil.python();
             let o = match o.map(|x|x.get(&pickle, py)) {
@@ -263,7 +304,13 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                     Err(error)
                 }
             }
-        }).await?
+        }).await?;
+
+        for s in guards {
+            let _ = s.send(());
+        }
+
+        r
     }
 }
 

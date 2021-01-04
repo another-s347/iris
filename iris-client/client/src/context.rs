@@ -2,6 +2,8 @@ use crate::hello_world::greeter_client::GreeterClient;
 
 use futures::prelude::*;
 use pyo3::prelude::*;
+use tracing::info;
+use tracing_subscriber::{Registry, fmt, prelude::__tracing_subscriber_SubscriberExt};
 
 
 use std::collections::HashMap;
@@ -42,17 +44,22 @@ pub struct IrisContextInternal {
 #[pymethods]
 impl IrisContextInternal {
     #[new]
-    fn new() -> Self {
+    fn new(py:Python<'_>, config: &PyAny) -> PyResult<Self> {
+        let d:bool = config.getattr("debug")?.extract()?;
+        let log_color:bool = config.getattr("log_color")?.extract()?;
+        setup_global_subscriber(d, log_color);
+        info!("Debug: {:#?}, Log with color: {}", d, log_color);
+
         let basic_rt = runtime::Builder::new()
             .threaded_scheduler()
             .enable_all()
             .build()
             .unwrap();
 
-        IrisContextInternal {
+        Ok(IrisContextInternal {
             runtime: basic_rt,
             nodes: HashMap::new(),
-        }
+        })
     }
 
     fn connect(&mut self, py:Python<'_>, address: String, node:String) -> PyResult<crate::IrisClientInternal> {
@@ -70,4 +77,18 @@ impl IrisContextInternal {
         })
     }
 
+}
+
+fn setup_global_subscriber(debug:bool, log_color: bool) {
+
+    let filter = if debug { tracing_subscriber::filter::EnvFilter::new("client=trace,mio=info,hyper=info") } else { tracing_subscriber::filter::EnvFilter::new("client=info,mio=info,hyper=info") };
+    let fmt_layer = fmt::Layer::default()
+        .with_ansi(log_color)
+        .with_timer(tracing_subscriber::fmt::time::SystemTime);
+
+    let subscriber = Registry::default()
+        .with(filter)
+        .with(fmt_layer);
+
+    tracing::subscriber::set_global_default(subscriber).expect("Could not set global default");
 }

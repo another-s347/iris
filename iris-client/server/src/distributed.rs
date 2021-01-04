@@ -41,7 +41,7 @@ impl N2n for NodeServer {
         request: Request<n2n::ObjectId>
     ) -> Result<Response<n2n::ObjectId>, tonic::Status> {
         let request = request.into_inner();
-        self.objects.del_remote(request.id);
+        self.objects.del_remote(request.id).await;
         return Ok(Response::new(n2n::ObjectId {
             id: request.id
         }))
@@ -53,7 +53,7 @@ impl N2n for NodeServer {
     ) -> Result<Response<HelloReply>, tonic::Status> {
         let request = request.into_inner();
         info!("wait object {}", request.id);
-        let object = self.objects.get(request.id).await.unwrap();
+        self.objects.after(request.id).await;
         info!("wait object {} done", request.id);
         return Ok(Response::new(n2n::HelloReply {
             message: "Ok".to_owned()
@@ -75,7 +75,8 @@ impl N2n for NodeServer {
         info!("get object {}",request.id);
         let pickle = self.pickle.clone();
         let objects = self.objects.clone();
-        let object = objects.get(request.id).await.unwrap();
+        let (o, s) = objects.get(request.id).await;
+        let object = o.unwrap();
         let node = self.node_addr.get(&addr).unwrap().value().clone();
         let object = tokio::task::spawn_blocking(move || {
             let gil = Python::acquire_gil();
@@ -89,6 +90,7 @@ impl N2n for NodeServer {
             crate::utils::dbg_py(py,crate::utils::dumps(&pickle, py, object)).unwrap()
         })
         .await.unwrap();
+        s.send(());
         let end = self.clock.end();
         let duration = self.clock.delta(start, end).as_nanos().try_into().unwrap();
         self.metrics.n2n_getobject_hitcount.fetch_add(1, Ordering::SeqCst);

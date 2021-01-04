@@ -4,17 +4,19 @@ import sys
 import functools
 from torch import optim
 import asyncio
-import traceback
+from inspect import getframeinfo, stack
 
 class IrisConfig:
     def __init__(self):
         self.go_async = True
         self.go_async_sequence = True
+        self.debug = True
+        self.log_color = True
 
 class IrisContext:
     def __init__(self, config = None):
         super().__init__()
-        self.inner = IrisContextInternal()
+        self.inner = IrisContextInternal(config)
         self.client_wrapper = {}
         self.config = config if config else IrisConfig()
         self.last_task = None
@@ -42,7 +44,7 @@ class IrisContext:
         return inner_client.create_object(module,  *args, **kwargs)
 
 class IrisObject:
-    def __init__(self, inner, node, ctx, args, kwargs, attrs=[]):
+    def __init__(self, inner, node, ctx, args, kwargs, attrs=[], i_stack=1):
         super().__init__()
         self.inner = inner
         self.node = node
@@ -53,9 +55,22 @@ class IrisObject:
         self.args = args
         self.kwargs = kwargs
         self.attrs = attrs
+        self.source = getframeinfo(stack()[i_stack][0]) if self.ctx.config.debug else None
+        self.log("create", i_stack=i_stack+1)
+
+    def log(self, msg, i_stack=2):
+        if self.ctx.config.debug:
+            if i_stack is None:
+                self.inner.log("",0,msg)
+            else:
+                source = getframeinfo(stack()[i_stack][0])
+                self.inner.log(source.filename, source.lineno, msg)
 
     def __repr__(self):
-        return f"Remote Object #{self.inner.id().id} on {self.node}, Type {self.type}"
+        if self.ctx.config.debug:
+            return f"Remote Object #{self.inner.id().id} on {self.node}, Type {self.type}, at {self.source.filename}:{self.source.lineno}"
+        else:
+            return f"Remote Object #{self.inner.id().id} on {self.node}, Type {self.type}"
 
     """
     Get a copy of object in remote node
@@ -71,6 +86,7 @@ class IrisObject:
         if self.value:
             raise NotImplementedError()
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
+        self.log("call")
         r = self.inner.call(
             b_args=r_args,
             b_kwargs=kwargs,
@@ -84,14 +100,15 @@ class IrisObject:
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx, args, kwargs)
+        return IrisObject(r, self.node, self.ctx, args, kwargs, i_stack=2)
 
-    def _call_with_attr(self, attr, go_async, args, kwargs={}):
+    def _call_with_attr(self, attr, go_async, args, kwargs={}, i_stack=3):
         if self.value:
             if args == None:
                 return getattr(self.value, attr)()
             return getattr(self.value, attr)(*args)
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
+        self.log("call with attr", i_stack)
         r = self.inner.call(
             b_args=r_args,
             b_kwargs=kwargs,
@@ -104,7 +121,7 @@ class IrisObject:
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx, args, kwargs)
+        return IrisObject(r, self.node, self.ctx, args, kwargs, i_stack=i_stack)
 
     def keys(self):
         return self._call_with_attr('keys', go_async=self.ctx.config.go_async, args=None)
@@ -119,9 +136,9 @@ class IrisObject:
             if r.exception():
                 exception = dill.loads(r.exception())
                 raise exception
-            return IrisObject(r, self.node, self.ctx, None, None)
+            return IrisObject(r, self.node, self.ctx, None, None, i_stack=2)
         else:
-            return IrisObject(self.inner, self.node, self.ctx, None, None, [*self.attrs, attr])
+            return IrisObject(self.inner, self.node, self.ctx, None, None, [*self.attrs, attr], i_stack=2)
 
     def __add__(self, other):
         return self._call_with_attr('__add__',go_async=self.ctx.config.go_async, args=(other,))
@@ -165,6 +182,9 @@ class IrisObject:
         if self.value:
             return getattr(self.value, '__index__')()
         return self._call_with_attr('__index__',go_async=self.ctx.config.go_async, args=None).get()
+
+    def __del__(self):
+        self.log("del",i_stack=None)
 
 class AsyncIterator:
     def __init__(self, inner):
@@ -318,7 +338,7 @@ class IrisClientWrapper:
             exception = dill.loads(r.exception())
             raise exception
         # print("time cost", r.time_cost_as_sec())
-        return IrisObject(r, self.node, self.ctx, args, kwargs)
+        return IrisObject(r, self.node, self.ctx, args, kwargs, i_stack=3)
 
     def apply(self, func, args, kwargs):
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
@@ -335,11 +355,11 @@ class IrisClientWrapper:
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx, args, kwargs)
+        return IrisObject(r, self.node, self.ctx, args, kwargs,i_stack=1)
 
     def get_remote_object(self, obj):
         r = self.inner.get_remote_object(obj.inner)
-        return IrisObject(r, self.node, self.ctx, None, None)
+        return IrisObject(r, self.node, self.ctx, None, None, i_stack=1)
 
 
 

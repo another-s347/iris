@@ -292,7 +292,8 @@ impl Greeter for IrisServer {
     async fn get_value(&self, request: Request<NodeObjectRef>) -> Result<Response<Value>, Status> {
         let request = request.into_inner();
         let maps = self.objects.clone();
-        let mut obj = maps.get(request.id).await.unwrap();
+        let (obj, s) = maps.get(request.id).await;
+        let obj = obj.unwrap();
         let pickle = self.pickle.clone();
         let data = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -312,6 +313,7 @@ impl Greeter for IrisServer {
         .await
         .unwrap()
         .unwrap();
+        s.send(());
         return Ok(Response::new(Value { data }));
     }
 

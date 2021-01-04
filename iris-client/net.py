@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
-
+import time
 
 class Net1(nn.Module):
     def __init__(self):
@@ -44,3 +44,17 @@ class Net2(nn.Module):
         x = self.fc2(x)
         output = F.log_softmax(x, dim=1)
         return output
+
+class TestData:
+    def __init__(self, x, did):
+        self.x = x
+        self.id = did
+class TestClass:
+    def __init__(self, add):
+        self.add = add
+
+    def __call__(self, x):
+        print(f"get data #{x.id} = {x.x}")
+        x.x += self.add
+        # time.sleep(1)
+        return x

@@ -120,6 +120,7 @@ impl Drop for GuardedIrisObject {
         //     // println!("drop object {}, type {}", self.node_ref.id, self.node_ref.r#type);
         //     self._del(request)
         // }
+        tracing::debug!("send del request {} at {}", self.node_ref.id, self.node_ref.location);
         let request = NodeObjectRef {
             id: self.node_ref.id,
             attr: vec![],
@@ -132,6 +133,10 @@ impl Drop for GuardedIrisObject {
 
 #[pymethods]
 impl IrisObjectInternal {
+    fn log(&mut self, _py: Python<'_>, source_file: &str, lineno: i32, msg: &str) {
+        tracing::debug!("{}:{} [{}:{}] {}", self.inner.node_ref.id, self.inner.node_ref.location ,source_file, lineno, msg);
+    }
+
     fn get_value<'p>(&mut self, py: Python<'p>, attrs: Vec<String>) -> Option<&'p PyBytes> {
         let request = NodeObjectRef {
             id: self.inner.node_ref.id,

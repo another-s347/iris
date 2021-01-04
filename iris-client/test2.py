@@ -5,8 +5,17 @@ import torch
 import net
 from torchvision import datasets, transforms
 import torch.nn.functional as F
+import itertools
 
-c = client.IrisContext()
+config = client.IrisConfig()
+# config.go_async = True
+# config.go_async_sequence = True
+config.go_async = False
+config.go_async_sequence = False
+config.debug = False
+config.log_color = False
+
+c = client.IrisContext(config)
 c.setup()
 
 model = c.create_object("node0", net.Net1)
@@ -27,48 +36,49 @@ optimizer2 = c.create_object("node1", torch.optim.SGD, model2.parameters(), lr=0
 correct = 0.
 test_loss = 0.
 len_testdataset = len(test_loader.dataset)
-for epoch in range(3):
+
+for epoch in range(1):
     for batch_idx, data in enumerate(train_loader):
-        optimizer.zero_grad()
-        optimizer2.zero_grad()
+        a = optimizer.zero_grad()
+        b = optimizer2.zero_grad()
+ 
         data, target = data[0], data[1]
         train_model = client.IrisModel(model)
         train_model2 = client.IrisModel(model2)
         result = train_model(data)
         result = train_model2(result)
-
         loss = c.client_wrapper[result.inner.node].apply(
             func = F.nll_loss,
             args = (result.inner, target),
             kwargs = None
         )
+
+        loss_value = loss.get()
         loss.backward()
         optimizer.step()
         optimizer2.step()
-        loss = loss.get()
+
         if batch_idx % 10 == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss:{:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader),loss))
+                100. * batch_idx / len(train_loader),loss_value))
 
     for batch_idx, data in enumerate(test_loader):
         data, target = data[0], data[1]
         output = model(data)
         result = model2(output)
-        pred = result.argmax(dim=1, keepdim=True).detach().get()
+        pred = result.argmax(dim=1, keepdim=True)
+        pred2 = pred.detach()
+        pred3 = pred2.get()
         target = target.get()
-        correct += pred.eq(target.view_as(pred)).sum().item()
+        correct += pred3.eq(target.view_as(pred3)).sum().item()
         test_loss /= len_testdataset
-
-        print(result, target)
 
         loss = c.client_wrapper[result.node].apply(
             func = F.nll_loss,
             args = (result, target),
             kwargs = None
         )
-
-        print(loss.get())
 
     print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)'.format(
             test_loss, correct, len_testdataset,

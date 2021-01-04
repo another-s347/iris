@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use prost::bytes::Bytes;
 use pyo3::prelude::*;
-use tracing::{debug, info};
+use tracing::{debug, info, log::warn};
 use std::{hash::{Hash, Hasher}, sync::atomic::Ordering};
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
@@ -29,7 +29,8 @@ pub struct Mem {
     objects: Arc<WaitMap<Key, MemCell>>,
     in_ref: Arc<DashMap<Key, u64>>,
     out_ref: Arc<DashMap<Key, Vec<String>>>,
-    balance: Arc<std::sync::atomic::AtomicI64>
+    balance: Arc<std::sync::atomic::AtomicI64>,
+    queue: Arc<DashMap<Key, tokio::sync::oneshot::Receiver<()>>>
 }
 
 #[derive(Clone)]
@@ -79,7 +80,8 @@ impl Default for Mem {
             objects: Arc::new(WaitMap::new()),
             in_ref: Arc::new(DashMap::new()),
             out_ref: Arc::new(DashMap::new()),
-            balance: Default::default()
+            balance: Default::default(),
+            queue: Default::default()
         }
     }
 }
@@ -96,7 +98,7 @@ impl Mem {
         };
         self.objects.insert(Key(id), MemCell { item, remote: None });
         let b = self.balance.fetch_add(1, Ordering::SeqCst);
-        debug!("object balance: {}", b);
+        debug!("object balance: {}, {}", b, self.queue.len());
 
         id
     }
@@ -115,11 +117,38 @@ impl Mem {
         }
     }
 
-    pub async fn get(&self, id: u64) -> Option<LazyPyObject> {
+    // For after command, the previous object may have been deleted
+    pub async fn after(&self, id: u64) {
+        // let start = std::time::Instant::now();
+        if self.objects.have(&Key(id)) {
+            self.objects.wait(&Key(id)).await;
+        }
+        // let result = self.objects.wait(&Key(id)).await.map(|x| x.value().item.clone());
+        // let (s, r) = tokio::sync::oneshot::channel();
+        // if let Some(mut receiver) = self.queue.get_mut(&Key(id)) {
+        //     let r = std::mem::replace(receiver.value_mut(), r);
+        //     // r.await;
+        // }
+        // else {
+        //     self.queue.insert(Key(id), r);
+        // }
+        // // println!("get wait {:?} s",std::time::Instant::now().duration_since(start).as_secs_f64());
+        // (result, s)
+    }
+
+    pub async fn get(&self, id: u64) -> (Option<LazyPyObject>, tokio::sync::oneshot::Sender<()>) {
         // let start = std::time::Instant::now();
         let result = self.objects.wait(&Key(id)).await.map(|x| x.value().item.clone());
+        let (s, r) = tokio::sync::oneshot::channel();
+        if let Some(mut receiver) = self.queue.get_mut(&Key(id)) {
+            let r = std::mem::replace(receiver.value_mut(), r);
+            // r.await;
+        }
+        else {
+            self.queue.insert(Key(id), r);
+        }
         // println!("get wait {:?} s",std::time::Instant::now().duration_since(start).as_secs_f64());
-        result
+        (result, s)
     }
 
     pub fn get_sync(&self, id: u64) -> Option<LazyPyObject> {
@@ -142,23 +171,38 @@ impl Mem {
     }
 
     pub async fn del(&self, id: u64) -> Option<Vec<String>> {
-        debug!("del object {}", id);
+        // only delete existed object
         if self.objects.have(&Key(id)) {
-            self.objects.wait(&Key(id)).await;
+            debug!("del object {}", id);
+            // ensure all previous tasks are finished.
+            let (o,s) = self.get(id).await;
+            s.send(());
             self.objects.cancel(&Key(id));
+            debug!("del object {} done", id);
             self.balance.fetch_sub(1, Ordering::SeqCst);
+            self.queue.remove(&Key(id));
             self.out_ref.remove(&Key(id)).map(|(_,x)| x.clone())
         }
         else {
+            warn!("delete on unknown object {}, duplicated del request?", id);
             None
         }
     }
 
-    pub fn del_remote(&self, id: u64) {
-        debug!("del remote object {}", id);
+    pub async fn del_remote(&self, id: u64) {
         if let Some((_,id)) = self.in_ref.remove(&Key(id)) {
+            debug!("del remote object {}", id);
+            let (o,s) = self.get(id).await;
+            s.send(());
+            debug!("del remote object {} done", id);
+            self.queue.remove(&Key(id));
             self.objects.cancel(&Key(id));
             self.balance.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+
+    // register object id after creating task, to avoid delete failed before the object creation finished.
+    pub fn reg(&self, id: u64) {
+        self.objects.reg(&Key(id));
     }
 }

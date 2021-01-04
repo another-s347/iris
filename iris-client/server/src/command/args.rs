@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use prost::bytes::Bytes;
 use proto::n2n;
 use pyo3::{PyObject, Python};
+use tokio::sync::oneshot::Sender;
 use tonic::{Request,Response};
 use crate::{Opt, distributed, hello_world::{greeter_server::Greeter, *}, mem::LazyPyObject, utils::LocalObject};
 use futures::FutureExt;
@@ -59,10 +60,13 @@ impl<'a> PrepareArgs<'a> {
         let mut local_objects:Vec<(u64, _)> = futures::future::join_all(local_objects).await;
 
         let mut local_ret = HashMap::new();
+        let mut guards = vec![];
         local_objects.drain(0..)
             .try_for_each::<_, crate::error::Result<_>>(|(id,o)|{
-                let o = o.with_context(||format!("timeout when fetching local object {:#?}", id))?.ok_or(anyhow::anyhow!("local object {} not found", id))?;
+                let (o, guard) = o.with_context(||format!("timeout when fetching local object {:#?}", id))?;
+                let o = o.ok_or(anyhow::anyhow!("local object {} not found", id))?;
                 local_ret.insert(id, o);
+                guards.push(guard);
                 Ok(())
             })?;
         
@@ -71,14 +75,16 @@ impl<'a> PrepareArgs<'a> {
 
         Ok(PrepareArgsResult {
             arg,
-            kwarg
+            kwarg,
+            guards
         })
     }
 }
 
 pub struct PrepareArgsResult {
     arg: LocalObject,
-    kwarg: LocalObject
+    kwarg: LocalObject,
+    pub guards: Vec<Sender<()>>
 }
 
 impl PrepareArgsResult {
