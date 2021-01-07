@@ -167,14 +167,15 @@ pub fn map_kwargs_to_local_impl<'a>(
                 tuple_args.push((key, LocalObject::Str(s)));
             }
             Some(proto_py_any::Data::ObjectId(id)) => {
-                let o = if let Some(new_id) = fetch_list.get(&id.id) {
-                    maps.get_sync(*new_id).ok_or(anyhow!("not found expected object {} from fetch list", id.id))?
+                if let Some(new_id) = fetch_list.get(&id.id) {
+                    let o = maps.get_sync(*new_id).ok_or(anyhow!("not found expected object {} from fetch list", id.id))?;
+                    tuple_args.push((key, LocalObject::Object(o, Vec::new())));
                 } else if let Some(o) = local_list.get(&id.id) {
-                    o.clone()
+                    tuple_args.push((key, LocalObject::Object(o.clone(), id.attr)));
                 } else {
-                    maps.get_sync(id.id).ok_or(anyhow!("not found expected object {} from local", id.id))?
-                };
+                    let o = maps.get_sync(id.id).ok_or(anyhow!("not found expected object {} from local", id.id))?;
                 tuple_args.push((key, LocalObject::Object(o, id.attr)));
+                };
             }
             Some(proto_py_any::Data::List(list)) => {
                 tuple_args.push((
@@ -234,14 +235,15 @@ pub fn map_list_to_local_impl<'a>(
                 tuple_args.push(LocalObject::Str(s));
             }
             Some(proto_py_any::Data::ObjectId(id)) => {
-                let o = if let Some(new_id) = fetch_list.get(&id.id) {
-                    maps.get_sync(*new_id).ok_or(anyhow!("not found expected object {} from fetch list", id.id))?
+                if let Some(new_id) = fetch_list.get(&id.id) {
+                    let o = maps.get_sync(*new_id).ok_or(anyhow!("not found expected object {} from fetch list", id.id))?;
+                    tuple_args.push(LocalObject::Object(o, Vec::new()));
                 } else if let Some(o) = local_list.get(&id.id) {
-                    o.clone()
+                    tuple_args.push(LocalObject::Object(o.clone(), id.attr));
                 } else {
-                    maps.get_sync(id.id).ok_or(anyhow!("not found expected object {} from local, local_list: {:#?}", id.id, local_list.keys()))?
-                };
+                    let o = maps.get_sync(id.id).ok_or(anyhow!("not found expected object {} from local, local_list: {:#?}", id.id, local_list.keys()))?;
                 tuple_args.push(LocalObject::Object(o, id.attr));
+                };
             }
             Some(proto_py_any::Data::List(list)) => {
                 tuple_args.push(map_list_to_local_impl(maps, list, fetch_list, local_list)?)
@@ -296,14 +298,16 @@ pub fn map_args_to_local_impl<'a>(
                 tuple_args.push(LocalObject::Str(s));
             }
             Some(proto_py_any::Data::ObjectId(id)) => {
-                let o = if let Some(new_id) = fetch_list.get(&id.id) {
-                    maps.get_sync(*new_id).ok_or(anyhow!("not found expected object {} from fetch list", id.id))?
+                if let Some(new_id) = fetch_list.get(&id.id) {
+                    let o = maps.get_sync(*new_id).ok_or(anyhow!("not found expected object {} from fetch list", id.id))?;
+                    tuple_args.push(LocalObject::Object(o, Vec::new()));
                 } else if let Some(o) = local_list.get(&id.id) {
-                    o.clone()
+                    tuple_args.push(LocalObject::Object(o.clone(), id.attr));
                 } else {
-                    maps.get_sync(id.id).ok_or(anyhow!("not found expected object {} from local, local_list: {:#?}", id.id, local_list.keys()))?
-                };
+                    let o = maps.get_sync(id.id).ok_or(anyhow!("not found expected object {} from local, local_list: {:#?}", id.id, local_list.keys()))?;
                 tuple_args.push(LocalObject::Object(o, id.attr));
+                };
+                
             }
             Some(proto_py_any::Data::List(list)) => {
                 tuple_args.push(map_list_to_local_impl(maps, list,  fetch_list, local_list)?);

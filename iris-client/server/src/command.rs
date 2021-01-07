@@ -105,6 +105,21 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         };
 
         let task:JoinHandle<crate::error::Result<Vec<Sender<()>>>> = tokio::spawn(async move {
+            // mem.get have to run not after 'after list' or fetch to avoid they took long time and the object got deleted.
+            let mut maybe_s = None;
+            let o= match request.get_target_object() {
+                CommandTarget::Object(id) => {
+                    let (w, s) = mem.get(id).await;
+                    maybe_s = Some(s);
+                    Some(w.ok_or(anyhow::anyhow!(format!("command target object {} not found", id)))?)
+                }
+                CommandTarget::Module(m) => {
+                    Some(LazyPyObject::new_object(modules.get(&m).ok_or(anyhow::anyhow!(format!("command target module {} not found", m)))?.value().clone()))
+                }
+                CommandTarget::None => {
+                    None
+                }
+            };
             // get remote request and after request have to be sent together to avoid remote object deleted between them
             let mut result = match (request.get_args(), request.get_option().map(|x|&x.after)) {
                 (Some(args), Some(after_list)) => {
@@ -151,19 +166,9 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                 vec![]
             };
 
-            let o= match request.get_target_object() {
-                CommandTarget::Object(id) => {
-                    let (w, s) = mem.get(id).await;
-                    guards.push(s);
-                    Some(w.ok_or(anyhow::anyhow!(format!("command target object {} not found", id)))?)
-                }
-                CommandTarget::Module(m) => {
-                    Some(LazyPyObject::new_object(modules.get(&m).ok_or(anyhow::anyhow!(format!("command target module {} not found", id)))?.value().clone()))
-                }
-                CommandTarget::None => {
-                    None
-                }
-            };
+            if let Some(s) = maybe_s {
+                guards.push(s);
+            }
     
             let request = request;
             

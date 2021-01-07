@@ -127,12 +127,14 @@ class IrisObject:
         return self._call_with_attr('keys', go_async=self.ctx.config.go_async, args=None)
 
     def to_node(self, node):
+        if node == self.node:
+            return self
         return self.ctx.client_wrapper[node].get_remote_object(self)
 
     def __getattr__(self, attr):
         # TODO: add options
         if False:
-            r = self.inner.get_attr([attr],go_attr=True)
+            r = self.inner.get_attr([attr],go_async=self.ctx.config.go_async,after_list = self.ctx.last_task)
             if r.exception():
                 exception = dill.loads(r.exception())
                 raise exception
@@ -274,6 +276,7 @@ class IrisModel:
             if type(a) is RemoteTensor:
                 if a.inner.node != self.model.node:
                     this = a.inner.to_node(self.model.node)
+                    this = this.clone().detach().requires_grad_()
                     group.add_input(a, this)
                     r_args.append(this)
                 else:
@@ -355,11 +358,11 @@ class IrisClientWrapper:
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
-        return IrisObject(r, self.node, self.ctx, args, kwargs,i_stack=1)
+        return IrisObject(r, self.node, self.ctx, args, kwargs,i_stack=2)
 
     def get_remote_object(self, obj):
         r = self.inner.get_remote_object(obj.inner)
-        return IrisObject(r, self.node, self.ctx, None, None, i_stack=1)
+        return IrisObject(r, self.node, self.ctx, None, None, i_stack=2)
 
 
 
@@ -370,7 +373,8 @@ def retrieve_args(self, node, ctx, args, cls=tuple):
     holds_ref = []
     for arg in args:
         if type(arg) is IrisObject:
-            a.append(arg.id.add_attr(arg.attrs))
+            x = arg.id.add_attr(arg.attrs)
+            a.append(x)
         elif type(arg) is list:
             rr = retrieve_args(self, node, ctx, a,  list)
             holds_ref.extend(rr[1])
