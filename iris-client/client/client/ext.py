@@ -140,7 +140,7 @@ class IrisObject:
                 raise exception
             return IrisObject(r, self.node, self.ctx, None, None, i_stack=2)
         else:
-            return IrisObject(self.inner, self.node, self.ctx, None, None, [*self.attrs, attr], i_stack=2)
+            return IrisObject(self.inner.clone(), self.node, self.ctx, None, None, [*self.attrs, attr], i_stack=2)
 
     def __add__(self, other):
         return self._call_with_attr('__add__',go_async=self.ctx.config.go_async, args=(other,))
@@ -187,6 +187,7 @@ class IrisObject:
 
     def __del__(self):
         self.log("del",i_stack=None)
+        self.inner.del_obj(go_async=self.ctx.config.go_async,after_list = self.ctx.last_task)
 
 class AsyncIterator:
     def __init__(self, inner):

@@ -134,7 +134,9 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                         nodes: nodes.as_ref(),
                         current_node: current_node.as_ref(),
                     }.wait();
-                    let (a,b) = futures::join!(r, a);
+                    let b = a.await;
+                    let a = r.await;
+                    // let (a,b) = futures::join!(r, a);
                     b?;
                     Some(a?)
                 }

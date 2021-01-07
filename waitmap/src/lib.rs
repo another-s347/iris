@@ -196,6 +196,19 @@ impl<K: Hash + Eq, V, S: BuildHasher + Clone> WaitMap<K, V, S> {
         self.map.contains_key(key)
     }
 
+    pub fn have_and_wait<'a: 'f, 'b: 'f, 'f, Q: ?Sized + Hash + Eq>(&'a self, qey: &'b Q)
+    -> Option<impl Future<Output = Option<Ref<'a, K, V, S>>> + 'f>
+    where
+        K: Borrow<Q> + From<&'b Q>,
+    {
+        if self.map.contains_key(&qey) {
+            Some(Wait::new(&self.map, qey))
+        }
+        else {
+            None
+        }
+    }
+
     /// Cancels all outstanding `waits` on the map.
     /// ```
     /// # extern crate async_std;

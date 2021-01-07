@@ -120,8 +120,8 @@ impl Mem {
     // For after command, the previous object may have been deleted
     pub async fn after(&self, id: u64) {
         // let start = std::time::Instant::now();
-        if self.objects.have(&Key(id)) {
-            self.objects.wait(&Key(id)).await;
+        if let Some(w) =  self.objects.have_and_wait(&Key(id)) {
+            w.await;
         }
         // let result = self.objects.wait(&Key(id)).await.map(|x| x.value().item.clone());
         // let (s, r) = tokio::sync::oneshot::channel();

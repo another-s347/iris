@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::utils::*;
+use crate::{command::after::After, utils::*};
 use crate::{distributed, mem::LazyPyObject};
 use tokio::task;
 use tonic::{Request, Response, Status};
@@ -268,14 +268,25 @@ impl Greeter for IrisServer {
 
     async fn del_object(
         &self,
-        request: Request<NodeObjectRef>,
-    ) -> Result<Response<NodeObjectRef>, Status> {
+        request: Request<DelRequest>,
+    ) -> Result<Response<HelloReply>, Status> {
         let start = std::time::Instant::now();
         let request = request.into_inner();
-        let id = request.id;
+        let id = request.object_id;
         info!("receive del request {}", id);
         let maps = &self.objects;
-        if let Some(out_refs) = maps.del(request.id).await {
+        match request.options {
+            Some(option) => {
+                After {
+                    objects: &option.after,
+                    mem: &self.objects,
+                    nodes: &self.nodes,
+                    current_node: &self.current_node
+                }.wait().await;
+            }
+            None => {}
+        }
+        if let Some(out_refs) = maps.del(request.object_id).await {
             for c in out_refs {
                 if let Some(client) = self.nodes.get(&c) {
                     let mut c = client.value().clone();
@@ -286,7 +297,9 @@ impl Greeter for IrisServer {
             }
         }
 
-        return Ok(Response::new(request));
+        return Ok(Response::new(HelloReply {
+            message: "123".to_string()
+        }));
     }
 
     async fn get_value(&self, request: Request<NodeObjectRef>) -> Result<Response<Value>, Status> {

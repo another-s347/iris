@@ -98,15 +98,15 @@ impl GuardedIrisObject {
         self.node_ref.exception.as_ref()
     }
 
-    fn _del(&mut self, request: NodeObjectRef) {
-        let mut client = self.client.clone();
-        self.runtime_handle.spawn(async move {
-            client
-                .del_object(tonic::Request::new(request))
-                .await
-                .unwrap();
-        });
-    }
+    // fn _del(&mut self, request: NodeObjectRef) {
+    //     let mut client = self.client.clone();
+    //     self.runtime_handle.spawn(async move {
+    //         client
+    //             .del_object(tonic::Request::new(request))
+    //             .await
+    //             .unwrap();
+    //     });
+    // }
 }
 
 impl Drop for GuardedIrisObject {
@@ -120,14 +120,14 @@ impl Drop for GuardedIrisObject {
         //     // println!("drop object {}, type {}", self.node_ref.id, self.node_ref.r#type);
         //     self._del(request)
         // }
-        tracing::debug!("send del request {} at {}", self.node_ref.id, self.node_ref.location);
-        let request = NodeObjectRef {
-            id: self.node_ref.id,
-            attr: vec![],
-            location: Default::default(),
-        };
-        // println!("drop object {}, type {}", self.node_ref.id, self.node_ref.r#type);
-        self._del(request)
+        tracing::debug!("should send del request {} at {}", self.node_ref.id, self.node_ref.location);
+        // let request = NodeObjectRef {
+        //     id: self.node_ref.id,
+        //     attr: vec![],
+        //     location: Default::default(),
+        // };
+        // // println!("drop object {}, type {}", self.node_ref.id, self.node_ref.r#type);
+        // self._del(request)
     }
 }
 
@@ -227,10 +227,32 @@ impl IrisObjectInternal {
     fn time_cost_as_sec(&self) -> f64 {
         self.inner.time_cost_as_sec()
     }
+
+    fn del_obj(&self, py: Python<'_>,go_async: bool,after_list: Option<&PyList>) -> PyResult<()> {
+        if Arc::strong_count(&self.inner) == 1 {
+            let request = DelRequest {
+                object_id: self.inner.id().id,
+                options: Some(RequestOption {
+                    r#async: go_async,
+                    after: list_to_after_list(after_list, py)?,
+                })
+            };
+            py.allow_threads(|| self._del(request));
+        }
+
+        Ok(())
+    } 
+
+    fn clone(&self) -> Self {
+        IrisObjectInternal {
+            inner: self.inner.clone()
+        }
+    }
 }
 
 impl IrisObjectInternal {
-    fn _del(&mut self, request: NodeObjectRef) {
+    fn _del(&self, request: DelRequest) {
+        tracing::debug!("send del request {} at {}", self.inner.id().id, self.inner.node_ref.location);
         let mut client = self.inner.client.clone();
         self.inner.runtime_handle.spawn(async move {
             client

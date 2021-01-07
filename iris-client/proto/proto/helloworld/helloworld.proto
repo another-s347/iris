@@ -17,7 +17,7 @@ service Greeter {
   rpc Apply (ApplyRequest) returns (NodeObject) {}
   rpc GetAttr(GetAttrRequest) returns (NodeObject) {}
   rpc GetValue(NodeObjectRef) returns (Value) {}
-  rpc DelObject(NodeObjectRef) returns (NodeObjectRef) {}
+  rpc DelObject(DelRequest) returns (HelloReply) {}
   rpc GetRemoteObject(NodeObjectRef) returns (NodeObject) {}
   rpc SyncObject(SyncRequest) returns (NodeObject) {}
 }
@@ -102,6 +102,11 @@ message NodeObject {
 message GetAttrRequest {
   uint64 object_id = 1;
   repeated string attr = 2;
+  RequestOption options = 3;
+}
+
+message DelRequest {
+  uint64 object_id = 1;
   RequestOption options = 3;
 }
 
