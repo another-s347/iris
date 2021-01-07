@@ -21,6 +21,9 @@ c.setup()
 model = c.create_object("node0", net.Net1)
 model2 = c.create_object("node1", net.Net2)
 
+def check(a):
+    return a.shape
+
 dataset = c.create_object("node0", datasets.MNIST, "../data", train=True, download=True, transform=transforms.Compose([
                            transforms.ToTensor(),
                            transforms.Normalize((0.1307,), (0.3081,))
@@ -37,25 +40,38 @@ correct = 0.
 test_loss = 0.
 len_testdataset = len(test_loader.dataset)
 
-for epoch in range(1):
-    for batch_idx, data in enumerate(train_loader):
-        a = optimizer.zero_grad()
-        b = optimizer2.zero_grad()
- 
-        data, target = data[0], data[1]
-        train_model = client.IrisModel(model)
-        train_model2 = client.IrisModel(model2)
-        result = train_model(data)
-        result = train_model2(result)
-        loss = c.client_wrapper[result.inner.node].apply(
-            func = F.nll_loss,
-            args = (result.inner, target),
+c.client_wrapper["node0"].apply(
+            func = torch.autograd.set_detect_anomaly,
+            args = (True,),
             kwargs = None
         )
-        result.group.add_output(loss)
-        loss = client.RemoteTensor(loss, result.group)
-        loss_value = loss.inner.get()
+
+c.client_wrapper["node1"].apply(
+            func = torch.autograd.set_detect_anomaly,
+            args = (True,),
+            kwargs = None
+        )
+
+for epoch in range(1):
+    for batch_idx, data in enumerate(train_loader):
+        optimizer.zero_grad()
+        optimizer2.zero_grad()
+ 
+        data, target = data[0], data[1]
+        result = model(data)
+        result_r = result.to_node(model2.node).clone().detach().requires_grad_()
+        result2 = model2(result_r)
+        loss = c.client_wrapper[result2.node].apply(
+            func = F.nll_loss,
+            args = (result2, target),
+            kwargs = None
+        )
+
+        loss_value = loss.get()
         loss.backward()
+        # # print(grad.size())
+        result.backward(result_r.grad).get()
+
         optimizer.step()
         optimizer2.step()
 
