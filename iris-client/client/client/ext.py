@@ -133,11 +133,13 @@ class IrisObject:
 
     def __getattr__(self, attr):
         # TODO: add options
-        if False:
+        if True:
             r = self.inner.get_attr([attr],go_async=self.ctx.config.go_async,after_list = self.ctx.last_task)
             if r.exception():
                 exception = dill.loads(r.exception())
                 raise exception
+            if self.ctx.config.go_async_sequence:
+                self.ctx.last_task = [r.id()]
             return IrisObject(r, self.node, self.ctx, None, None, i_stack=2)
         else:
             return IrisObject(self.inner.clone(), self.node, self.ctx, None, None, [*self.attrs, attr], i_stack=2)
@@ -333,7 +335,7 @@ class IrisClientWrapper:
             b_args=r_args,
             b_kwargs=kwargs,
             pickle=dill,
-            go_async=True,
+            go_async=self.ctx.config.go_async,
             after_list = self.ctx.last_task
         )
         if self.ctx.config.go_async_sequence:
@@ -351,7 +353,7 @@ class IrisClientWrapper:
             b_args=r_args,
             b_kwargs=kwargs,
             pickle=dill,
-            go_async=True,
+            go_async=self.ctx.config.go_async,
             after_list = self.ctx.last_task
         )
         if self.ctx.config.go_async_sequence:
@@ -362,7 +364,13 @@ class IrisClientWrapper:
         return IrisObject(r, self.node, self.ctx, args, kwargs,i_stack=2)
 
     def get_remote_object(self, obj):
-        r = self.inner.get_remote_object(obj.inner)
+        r = self.inner.get_remote_object(obj.inner,go_async=self.ctx.config.go_async,
+            after_list = self.ctx.last_task)
+        if self.ctx.config.go_async_sequence:
+            self.ctx.last_task = [r.id()]
+        if r.exception():
+            exception = dill.loads(r.exception())
+            raise exception
         return IrisObject(r, self.node, self.ctx, None, None, i_stack=2)
 
 

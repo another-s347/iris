@@ -32,6 +32,12 @@ pub enum Error {
         #[from]
         source: tokio::task::JoinError,
         backtrace: Backtrace,
+    },
+    #[error("tokio timeout error: {source:#?}")]
+    TimeoutError{
+        #[from]
+        source: tokio::time::Elapsed,
+        backtrace: Backtrace,
     }
 }
 

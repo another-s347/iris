@@ -20,8 +20,6 @@ impl<'a> After<'a> {
         let mut local_tasks = Vec::new();
         let mut remote_tasks = Vec::new();
 
-        info!("wait for object {:?}", self.objects);
-
         for o in self.objects {
             if o.location != self.current_node {
                 // todo: Logically, the request should be passed to unconnected nodes.

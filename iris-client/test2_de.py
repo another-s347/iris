@@ -70,7 +70,7 @@ for epoch in range(1):
         loss_value = loss.get()
         loss.backward()
         # # print(grad.size())
-        result.backward(result_r.grad).get()
+        result.backward(result_r.grad)
 
         optimizer.step()
         optimizer2.step()

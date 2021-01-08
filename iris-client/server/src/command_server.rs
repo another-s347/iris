@@ -227,23 +227,23 @@ impl Greeter for IrisServer {
 
     async fn get_remote_object(
         &self,
-        request: Request<NodeObjectRef>,
+        request: Request<GetRemoteObjectRequest>,
     ) -> Result<Response<NodeObject>, Status> {
         let request = request.into_inner();
-        let id = request.id;
-        let request = vec![request];
-        let result: HashMap<u64, u64> = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.fetch_remote(&request),
-        )
-        .await
-        .unwrap();
-        let id = *result.get(&id).unwrap();
-        return Ok(Response::new(NodeObject {
-            id,
-            location: self.current_node.as_str().to_string(),
-            ..Default::default()
-        }));
+        let result = crate::command::get_remote_object::GetRemoteRequest {
+            request,
+            mem: &self.objects,
+            nodes: &self.nodes,
+            current_node: self.current_node.as_ref(),
+            pickle: &self.pickle,
+        }.run().await;
+        match result {
+            Ok(r) => Ok(Response::new(r)),
+            Err(error) => {
+                warn!("{:#?}", error);
+                Err(tonic::Status::internal(format!("{:#?}", error)))
+            }
+        }
     }
 
     async fn get_attr(

@@ -18,7 +18,7 @@ service Greeter {
   rpc GetAttr(GetAttrRequest) returns (NodeObject) {}
   rpc GetValue(NodeObjectRef) returns (Value) {}
   rpc DelObject(DelRequest) returns (HelloReply) {}
-  rpc GetRemoteObject(NodeObjectRef) returns (NodeObject) {}
+  rpc GetRemoteObject(GetRemoteObjectRequest) returns (NodeObject) {}
   rpc SyncObject(SyncRequest) returns (NodeObject) {}
 }
 
@@ -79,6 +79,11 @@ message ApplyRequest {
   bytes func = 1;
   CallArgs arg = 2;
   RequestOption options = 3;
+}
+
+message GetRemoteObjectRequest {
+  NodeObjectRef object = 1;
+  RequestOption options = 2;
 }
 
 message ConnectRequest {

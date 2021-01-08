@@ -31,7 +31,7 @@ impl super::ControlCommandRequest for ApplyRequest {
 }
 
 impl super::ControlCommand for ApplyCommand {
-    const NAME:&'static str = "Call";
+    const NAME:&'static str = "Apply";
     type Request = ApplyRequest;
 
     fn new(

@@ -471,13 +471,23 @@ impl IrisClientInternal {
         py: Python<'_>,
         obj: &IrisObjectInternal,
         attr: Option<Vec<String>>,
-    ) -> IrisObjectInternal {
+        go_async: bool,
+        after_list: Option<&PyList>
+    ) -> PyResult<IrisObjectInternal> {
         let start = std::time::Instant::now();
         let id = obj.inner.id();
-        let request = NodeObjectRef {
+        let options = Some(RequestOption {
+            r#async:go_async,
+            after: list_to_after_list(after_list, py)?
+        });
+        let object = NodeObjectRef {
             id: id.id,
             location: id.location,
             attr: attr.unwrap_or_default(),
+        };
+        let request = GetRemoteObjectRequest {
+            object: Some(object),
+            options
         };
         let node_ref = py
             .allow_threads(|| {
@@ -486,7 +496,7 @@ impl IrisClientInternal {
             })
             .unwrap()
             .into_inner();
-        IrisObjectInternal {
+        Ok(IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
                 runtime_handle: self.runtime_handle.clone(),
                 client: self.client.clone(),
@@ -495,7 +505,7 @@ impl IrisClientInternal {
                 mem_ref: self.mem.clone(),
                 r#async: false
             }),
-        }
+        })
     }
 
     fn create_object(
