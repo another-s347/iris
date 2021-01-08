@@ -5,6 +5,7 @@ import functools
 from torch import optim
 import asyncio
 from inspect import getframeinfo, stack
+import functools
 
 class IrisConfig:
     def __init__(self):
@@ -279,7 +280,6 @@ class IrisModel:
             if type(a) is RemoteTensor:
                 if a.inner.node != self.model.node:
                     this = a.inner.to_node(self.model.node)
-                    this = this.clone().detach().requires_grad_()
                     group.add_input(a, this)
                     r_args.append(this)
                 else:
@@ -397,3 +397,34 @@ def retrieve_args(self, node, ctx, args, cls=tuple):
         else:
             a.append(arg)
     return cls(a), holds_ref
+
+class RemoteFunction:
+    def __init__(self, func, ctx):
+        self.func = func
+        self.ctx = ctx
+        self.func_bytes = dill.dumps(self.func)
+        self.cache_objects = {}
+
+    def to_node(self, node):
+        r = self.ctx.client_wrapper[node].inner.send(self.func_bytes, go_async=self.ctx.config.go_async,
+            after_list = self.ctx.last_task)
+        if self.ctx.config.go_async_sequence:
+            self.ctx.last_task = [r.id()]
+        if r.exception():
+            exception = dill.loads(r.exception())
+            raise exception
+        self.cache_objects[node] = IrisObject(r, node, self.ctx, None, None, i_stack=2)
+
+    def on(self, node):
+        if node not in self.ctx.client_wrapper:
+            raise NotImplementedError()
+        if node not in self.cache_objects:
+            self.to_node(node)
+        return self.cache_objects[node]
+
+def remote(ctx):
+    if ctx is None:
+        raise NotImplementedError()
+    def wrapper(func):
+        return RemoteFunction(func, ctx)
+    return wrapper

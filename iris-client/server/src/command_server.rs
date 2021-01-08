@@ -225,6 +225,22 @@ impl Greeter for IrisServer {
         }
     }
 
+    async fn send(&self, request: Request<SendRequest>) -> Result<Response<NodeObject>, Status> {
+        let start = std::time::Instant::now();
+        let mut request = request.into_inner();
+        let result =
+            crate::command::ControlCommandTask::<crate::command::send::SendCommand>::new(request)
+                .run(self)
+                .await;
+        match result {
+            Ok(r) => Ok(Response::new(r)),
+            Err(error) => {
+                warn!("{:#?}", error);
+                Err(tonic::Status::internal(format!("{:#?}", error)))
+            }
+        }
+    }
+
     async fn get_remote_object(
         &self,
         request: Request<GetRemoteObjectRequest>,

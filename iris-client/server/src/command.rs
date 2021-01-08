@@ -36,6 +36,7 @@ pub mod call;
 pub mod create_object;
 pub mod get_attr;
 pub mod get_remote_object;
+pub mod send;
 
 pub enum CommandTarget {
     Object(u64),

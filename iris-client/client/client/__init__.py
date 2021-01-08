@@ -1,12 +1,12 @@
 from .client import WordCounter, count_line, IrisClientInternal, IrisObjectInternal, IrisContextInternal, IrisObjectId
-from client.ext import IrisContext, IrisClientWrapper, IrisObject, IrisModel, RemoteTensor, AsyncIterator, IrisConfig
+from client.ext import IrisContext, IrisClientWrapper, IrisObject, IrisModel, RemoteTensor, AsyncIterator, IrisConfig, remote, RemoteFunction
 __all__ = [
-    "WordCounter", 
-    "count_line", 
-    "search_py", 
-    "IrisContextInternal", 
+    "WordCounter",
+    "count_line",
+    "search_py",
+    "IrisContextInternal",
     "IrisObjectInternal",
-    "IrisClientInternal", 
+    "IrisClientInternal",
     "IrisContext",
     "IrisModel",
     "AsyncTest",
@@ -14,8 +14,10 @@ __all__ = [
     "retrieve_args",
     "RemoteTensor",
     "AsyncIterator",
-    "IrisConfig"
-    ]
+    "IrisConfig",
+    "remote",
+    "RemoteFunction"
+]
 
 
 def search_py(path, needle):

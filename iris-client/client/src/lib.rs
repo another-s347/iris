@@ -403,6 +403,25 @@ impl IrisClientInternal {
             }),
         }
     }
+
+    fn _send(&mut self, request: SendRequest) -> IrisObjectInternal {
+        let start = Instant::now();
+        let a = request.options.as_ref().map(|x|x.r#async).unwrap_or(false);
+        let task_handle = self
+            .runtime_handle
+            .block_on(self.client.send(tonic::Request::new(request)));
+        let node_ref = task_handle.unwrap().into_inner();
+        IrisObjectInternal {
+            inner: Arc::new(GuardedIrisObject {
+                runtime_handle: self.runtime_handle.clone(),
+                client: self.client.clone(),
+                node_ref,
+                time_cost: Instant::now() - start,
+                mem_ref: self.mem.clone(),
+                r#async: a
+            }),
+        }
+    }
 }
 
 #[pymethods]
@@ -464,6 +483,21 @@ impl IrisClientInternal {
         });
         let request = ApplyRequest { arg, func, options };
         Ok(py.allow_threads(|| self._apply(request)))
+    }
+
+    fn send(
+        &mut self,
+        py: Python<'_>,
+        func: Vec<u8>,
+        go_async: bool,
+        after_list: Option<&PyList>
+    ) -> PyResult<IrisObjectInternal> {
+        let options = Some(RequestOption {
+            r#async:go_async,
+            after: list_to_after_list(after_list, py)?
+        });
+        let request = SendRequest { func, options };
+        Ok(py.allow_threads(|| self._send(request)))
     }
 
     fn get_remote_object(
