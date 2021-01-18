@@ -115,11 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         current_node: Arc::new(format!("node{}:{}", opt.address, opt.port)),
         nodes_addr: addrs,
         metrics: metrics.clone(),
-        clock: quanta::Clock::new(),
-        last_exception: Arc::new(Mutex::new(None)),
+        traffic: traffic.clone()
     };
 
-    let t2 = traffic.clone();
     let (tx, mut rx) = tokio::sync::broadcast::channel(1);
     let mut rx2 = tx.subscribe();
     ctrlc::set_handler(move || {
@@ -148,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let t2 = tokio::spawn(async move {
         let server_n2n = Server::builder()
-            .concurrency_limit_per_connection(4096)
+            // .concurrency_limit_per_connection(4096)
             .add_service(proto::n2n::n2n_server::N2nServer::new(distributed_server))
             .serve_with_incoming_shutdown(
                 tcp.incoming().map_ok(|x| {
@@ -192,16 +190,17 @@ fn setup_global_subscriber(color: bool) {
     let filter = tracing_subscriber::filter::EnvFilter::new("server=trace,mio=info,hyper=info");
     let fmt_layer = fmt::Layer::default()
         .with_ansi(color)
+        .with_target(true)
         .with_timer(tracing_subscriber::fmt::time::SystemTime);
 
-    let file_layer = fmt::Layer::default()
-        .with_ansi(false)
-        .with_writer(|| tracing_appender::rolling::never(".", "prefix.log"));
+    // let file_layer = fmt::Layer::default()
+    //     .with_ansi(false)
+    //     .with_writer(|| tracing_appender::rolling::never(".", "prefix.log"));
 
     let subscriber = Registry::default()
         .with(filter)
-        .with(fmt_layer)
-        .with(file_layer);
+        .with(fmt_layer);
+        // .with(file_layer);
 
     tracing::subscriber::set_global_default(subscriber).expect("Could not set global default");
 }

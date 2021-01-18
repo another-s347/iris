@@ -98,7 +98,7 @@ impl GuardedIrisObject {
         self.node_ref.exception.as_ref()
     }
 
-    // fn _del(&mut self, request: NodeObjectRef) {
+    // fn _del(&self, request: NodeObjectRef) {
     //     let mut client = self.client.clone();
     //     self.runtime_handle.spawn(async move {
     //         client
@@ -133,11 +133,11 @@ impl Drop for GuardedIrisObject {
 
 #[pymethods]
 impl IrisObjectInternal {
-    fn log(&mut self, _py: Python<'_>, source_file: &str, lineno: i32, msg: &str) {
+    fn log(&self, _py: Python<'_>, source_file: &str, lineno: i32, msg: &str) {
         tracing::debug!("{}:{} [{}:{}] {}", self.inner.node_ref.id, self.inner.node_ref.location ,source_file, lineno, msg);
     }
 
-    fn get_value<'p>(&mut self, py: Python<'p>, attrs: Vec<String>) -> Option<&'p PyBytes> {
+    fn get_value<'p>(&self, py: Python<'p>, attrs: Vec<String>) -> Option<&'p PyBytes> {
         let request = NodeObjectRef {
             id: self.inner.node_ref.id,
             location: Default::default(),
@@ -148,7 +148,7 @@ impl IrisObjectInternal {
     }
 
     fn call(
-        &mut self,
+        &self,
         py: Python<'_>,
         b_args: Option<&PyTuple>,
         b_kwargs: Option<&PyDict>,
@@ -173,7 +173,7 @@ impl IrisObjectInternal {
         py.allow_threads(|| self._call(arg, attr, options))
     }
 
-    fn get_attr(&mut self, py: Python<'_>, attr: Vec<String>, go_async: bool, after_list: Option<&PyList>) -> PyResult<IrisObjectInternal> {
+    fn get_attr(&self, py: Python<'_>, attr: Vec<String>, go_async: bool, after_list: Option<&PyList>) -> PyResult<IrisObjectInternal> {
         let request = GetAttrRequest {
             attr,
             object_id: self.inner.node_ref.id,
@@ -262,7 +262,7 @@ impl IrisObjectInternal {
         });
     }
 
-    fn _get_value(&mut self, request: NodeObjectRef) -> Option<Vec<u8>> {
+    fn _get_value(&self, request: NodeObjectRef) -> Option<Vec<u8>> {
         let task_handle = self.inner.runtime_handle.block_on(
             self.inner
                 .client
@@ -274,7 +274,7 @@ impl IrisObjectInternal {
     }
 
     fn _call(
-        &mut self,
+        &self,
         arg: Option<CallArgs>,
         attr: Option<Vec<String>>,
         options: Option<RequestOption>
@@ -304,7 +304,7 @@ impl IrisObjectInternal {
         })
     }
 
-    fn _get_attr(&mut self, request: GetAttrRequest) -> IrisObjectInternal {
+    fn _get_attr(&self, request: GetAttrRequest) -> IrisObjectInternal {
         let start = Instant::now();
         let a = request.options.as_ref().map(|x|x.r#async).unwrap_or(false);
         let mut client = self.inner.client.clone();
@@ -325,7 +325,7 @@ impl IrisObjectInternal {
         }
     }
 
-    fn _sync(&mut self) {
+    fn _sync(&self) {
         let start = Instant::now();
         let mut client = self.inner.client.clone();
         let task_handle = self
@@ -338,12 +338,12 @@ impl IrisObjectInternal {
 }
 
 impl IrisClientInternal {
-    fn _create_object(&mut self, request: CreateRequest) -> IrisObjectInternal {
+    fn _create_object(&self, request: CreateRequest) -> IrisObjectInternal {
         let start = Instant::now();
         let a = request.options.as_ref().map(|x|x.r#async).unwrap_or(false);
         let task_handle = self
             .runtime_handle
-            .block_on(self.client.create_object(tonic::Request::new(request)));
+            .block_on(self.client.clone().create_object(tonic::Request::new(request)));
         let node_ref = task_handle.unwrap().into_inner();
         IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
@@ -357,14 +357,14 @@ impl IrisClientInternal {
         }
     }
 
-    fn _init(&mut self, request: InitRequest) {
+    fn _init(&self, request: InitRequest) {
         self.runtime_handle
-            .block_on(self.client.init(tonic::Request::new(request)))
+            .block_on(self.client.clone().init(tonic::Request::new(request)))
             .unwrap();
     }
 
     // fn _torch_call_async(
-    //     &mut self,
+    //     &self,
     //     request: TorchRpcCallRequest,
     // ) -> JoinHandle<IrisObjectInternal> {
     //     let mut client = self.client.clone();
@@ -385,12 +385,12 @@ impl IrisClientInternal {
     //     // task_handle
     // }
 
-    fn _apply(&mut self, request: ApplyRequest) -> IrisObjectInternal {
+    fn _apply(&self, request: ApplyRequest) -> IrisObjectInternal {
         let start = Instant::now();
         let a = request.options.as_ref().map(|x|x.r#async).unwrap_or(false);
         let task_handle = self
             .runtime_handle
-            .block_on(self.client.apply(tonic::Request::new(request)));
+            .block_on(self.client.clone().apply(tonic::Request::new(request)));
         let node_ref = task_handle.unwrap().into_inner();
         IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
@@ -404,12 +404,12 @@ impl IrisClientInternal {
         }
     }
 
-    fn _send(&mut self, request: SendRequest) -> IrisObjectInternal {
+    fn _send(&self, request: SendRequest) -> IrisObjectInternal {
         let start = Instant::now();
         let a = request.options.as_ref().map(|x|x.r#async).unwrap_or(false);
         let task_handle = self
             .runtime_handle
-            .block_on(self.client.send(tonic::Request::new(request)));
+            .block_on(self.client.clone().send(tonic::Request::new(request)));
         let node_ref = task_handle.unwrap().into_inner();
         IrisObjectInternal {
             inner: Arc::new(GuardedIrisObject {
@@ -426,42 +426,42 @@ impl IrisClientInternal {
 
 #[pymethods]
 impl IrisClientInternal {
-    fn add_set_result(&mut self, _py: Python<'_>, async_task: AsyncTaskKey, callback: &PyAny) {
-        let object: PyObject = callback.into();
-        if let Some(task) = self.async_tasks.remove(&async_task.uuid) {
-            let t = task.inner.then(|x| async move {
-                let result = x.unwrap();
-                let gil = Python::acquire_gil();
-                let py = gil.python();
-                let pycell = PyCell::new(py, result).unwrap();
-                let args = PyTuple::new(py, &[pycell]);
-                object.call1(py, args).unwrap();
-            });
-            self.runtime_handle.spawn(t);
-        }
-    }
+    // fn add_set_result(&self, _py: Python<'_>, async_task: AsyncTaskKey, callback: &PyAny) {
+    //     let object: PyObject = callback.into();
+    //     if let Some(task) = self.async_tasks.remove(&async_task.uuid) {
+    //         let t = task.inner.then(|x| async move {
+    //             let result = x.unwrap();
+    //             let gil = Python::acquire_gil();
+    //             let py = gil.python();
+    //             let pycell = PyCell::new(py, result).unwrap();
+    //             let args = PyTuple::new(py, &[pycell]);
+    //             object.call1(py, args).unwrap();
+    //         });
+    //         self.runtime_handle.spawn(t);
+    //     }
+    // }
 
-    fn batch_wait<'p>(
-        &mut self,
-        py: Python<'p>,
-        tasks: Vec<AsyncTaskKey>,
-    ) -> Vec<IrisObjectInternal> {
-        let mut t = vec![];
-        for key in tasks {
-            if let Some(task) = self.async_tasks.remove(&key.uuid) {
-                t.push(task);
-            }
-        }
-        py.allow_threads(|| {
-            self.runtime_handle.block_on(
-                join_all(t.drain(0..).map(|x| x.inner))
-                    .map(|mut x| x.drain(0..).map(|i| i.unwrap()).collect()),
-            )
-        })
-    }
+    // fn batch_wait<'p>(
+    //     &self,
+    //     py: Python<'p>,
+    //     tasks: Vec<AsyncTaskKey>,
+    // ) -> Vec<IrisObjectInternal> {
+    //     let mut t = vec![];
+    //     for key in tasks {
+    //         if let Some(task) = self.async_tasks.remove(&key.uuid) {
+    //             t.push(task);
+    //         }
+    //     }
+    //     py.allow_threads(|| {
+    //         self.runtime_handle.block_on(
+    //             join_all(t.drain(0..).map(|x| x.inner))
+    //                 .map(|mut x| x.drain(0..).map(|i| i.unwrap()).collect()),
+    //         )
+    //     })
+    // }
 
     fn apply(
-        &mut self,
+        &self,
         py: Python<'_>,
         func: Vec<u8>,
         b_args: Option<&PyTuple>,
@@ -486,7 +486,7 @@ impl IrisClientInternal {
     }
 
     fn send(
-        &mut self,
+        &self,
         py: Python<'_>,
         func: Vec<u8>,
         go_async: bool,
@@ -501,7 +501,7 @@ impl IrisClientInternal {
     }
 
     fn get_remote_object(
-        &mut self,
+        &self,
         py: Python<'_>,
         obj: &IrisObjectInternal,
         attr: Option<Vec<String>>,
@@ -526,7 +526,7 @@ impl IrisClientInternal {
         let node_ref = py
             .allow_threads(|| {
                 self.runtime_handle
-                    .block_on(self.client.get_remote_object(tonic::Request::new(request)))
+                    .block_on(self.client.clone().get_remote_object(tonic::Request::new(request)))
             })
             .unwrap()
             .into_inner();
@@ -543,7 +543,7 @@ impl IrisClientInternal {
     }
 
     fn create_object(
-        &mut self,
+        &self,
         py: Python<'_>,
         module: &str,
         qualname: &str,
@@ -574,7 +574,7 @@ impl IrisClientInternal {
     }
 
     fn init(
-        &mut self,
+        &self,
         py: Python<'_>,
         modules: Vec<String>,
         path: Vec<String>,
@@ -591,8 +591,16 @@ impl IrisClientInternal {
         Ok(())
     }
 
+    fn close(&self, py: Python<'_>) {
+        py.allow_threads(||{
+            let task_handle = self
+            .runtime_handle
+            .block_on(self.client.clone().close(tonic::Request::new(Null {})));
+        })
+    }
+
     // fn torch_call_async(
-    //     &mut self,
+    //     &self,
     //     py: Python<'_>,
     //     target_node: &str,
     //     object_id: u64,
@@ -626,7 +634,7 @@ impl IrisClientInternal {
     //     AsyncTaskKey { uuid: key }
     // }
 
-    fn connect_nodes(&mut self, py: Python<'_>, mut nodes: HashMap<String, String>) {
+    fn connect_nodes(&self, py: Python<'_>, mut nodes: HashMap<String, String>) {
         let request = ConnectRequest {
             nodes: nodes
                 .drain()

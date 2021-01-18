@@ -1,19 +1,8 @@
-use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::{collections::{hash_map::DefaultHasher, HashMap}, hash::{Hash, Hasher}, sync::Arc, fmt::Debug, time::Duration};
 
-use crate::{
-    command_server::IrisServer,
-    distributed,
-    hello_world::{greeter_server::Greeter, *},
-    mem::LazyPyObject,
-    utils::LocalObject,
-    Opt,
-};
+use crate::{Opt, command_server::IrisServer, metrics::SingleCommand, distributed, hello_world::{greeter_server::Greeter, *}, mem::LazyPyObject, utils::LocalObject};
 use after::After;
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use args::PrepareArgsResult;
 use dashmap::DashMap;
 use futures::FutureExt;
@@ -23,7 +12,7 @@ use pyo3::{
     types::{PyModule, PyTuple},
     Py, PyAny, PyObject, PyResult, Python,
 };
-use tokio::{sync::oneshot::Sender, task::JoinHandle};
+use tokio::{task::JoinHandle};
 use tonic::{Request, Response};
 use tracing::{debug, info, span, warn, Instrument};
 
@@ -44,7 +33,7 @@ pub enum CommandTarget {
     None,
 }
 
-pub trait ControlCommandRequest: Send + 'static {
+pub trait ControlCommandRequest: Send + 'static + Debug {
     fn get_target_object(&self) -> CommandTarget;
     fn get_option(&self) -> Option<&RequestOption>;
     fn get_args(&self) -> Option<CallArgs>;
@@ -91,7 +80,6 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         let id = hasher.finish();
 
         let go_async = request.get_async();
-        debug!("create task {} for cmd {}", id, T::NAME);
         ControlCommandTask {
             id,
             request,
@@ -112,6 +100,7 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                 server.pickle.clone(),
                 &server.current_node,
                 server.modules.clone(),
+                &server.metrics
             )
             .await
         } else {
@@ -121,6 +110,7 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                 server.pickle.clone(),
                 &server.current_node,
                 &server.modules,
+                &server.metrics
             )
             .instrument(span!(
                 tracing::Level::INFO,
@@ -139,15 +129,17 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         pickle: PyObject,
         current_node: &str,
         modules: Arc<DashMap<String, PyObject>>,
+        metrics: &crate::metrics::ExecutionMeter
     ) -> crate::error::Result<NodeObject>
     where
         <T as ControlCommand>::Request: Sync,
     {
         let request = self.request;
         let mem = mem.clone();
-        let moudles = modules.clone();
+        // let moudles = modules.clone();
         let nodes = nodes.clone();
         let current_node = current_node.to_owned();
+        let metrics = metrics.clone();
         let id = self.id;
 
         let ret = NodeObject {
@@ -158,16 +150,29 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
             ..Default::default()
         };
 
-        let task: JoinHandle<crate::error::Result<Vec<Sender<()>>>> = tokio::spawn(async move {
+        let task: JoinHandle<crate::error::Result<Vec<_>>> = tokio::spawn(async move {
+            let mut record = SingleCommand {
+                cmd: T::NAME,
+                duration_all: None,
+                duration_execution: None,
+                duration_get_target_object: None,
+                duration_after: None,
+                duration_prepare: None
+            };
+            let start = std::time::Instant::now();
+            let mut current = start.clone();
             // mem.get have to run not after 'after list' or fetch to avoid they took long time and the object got deleted.
             let mut maybe_s = None;
             let o = match request.get_target_object() {
-                CommandTarget::Object(id) => {
-                    let (w, s) = mem.get(id).await;
+                CommandTarget::Object(tid) => {
+                    let (w, s) = tokio::time::timeout(Duration::from_secs(30), mem.get(tid)).await.with_context(||format!("get target object {}", tid))?;
+                    let end_of_get_target_object = std::time::Instant::now();
+                    record.duration_get_target_object = Some(end_of_get_target_object - current);
+                    current = end_of_get_target_object;
                     maybe_s = Some(s);
                     Some(w.ok_or(anyhow::anyhow!(format!(
                         "command target object {} not found",
-                        id
+                        tid
                     )))?)
                 }
                 CommandTarget::Module(m) => Some(LazyPyObject::new_object(
@@ -182,50 +187,33 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                 )),
                 CommandTarget::None => None,
             };
-            info!(target=id ,"wait for object {:?}", request.get_option().as_ref().map(|x| &x.after));
-            // get remote request and after request have to be sent together to avoid remote object deleted between them
-            let mut result = match (request.get_args(), request.get_option().map(|x| &x.after)) {
-                (Some(args), Some(after_list)) => {
-                    let r = PrepareArgs {
-                        args,
-                        mem: &mem,
-                        nodes: nodes.as_ref(),
-                    }
-                    .prepare();
-                    let a = After {
-                        objects: after_list,
-                        mem: &mem,
-                        nodes: nodes.as_ref(),
-                        current_node: current_node.as_ref(),
-                    }
-                    .wait();
-                    let b = a.await;
-                    let a = r.await;
-                    // let (a,b) = futures::join!(r, a);
-                    b?;
-                    Some(a?)
+
+            if let Some(after_list) = request.get_option().as_ref().map(|x|&x.after) {
+                After {
+                    objects: after_list,
+                    mem: &mem,
+                    nodes: nodes.as_ref(),
+                    current_node: current_node.as_ref(),
                 }
-                (Some(args), None) => Some(
-                    PrepareArgs {
-                        args,
-                        mem: &mem,
-                        nodes: nodes.as_ref(),
-                    }
-                    .prepare()
-                    .await?,
-                ),
-                (None, Some(after_list)) => {
-                    After {
-                        objects: after_list,
-                        mem: &mem,
-                        nodes: nodes.as_ref(),
-                        current_node: current_node.as_ref(),
-                    }
-                    .wait()
-                    .await?;
-                    None
+                .wait().await?;
+                let end_of_after = std::time::Instant::now();
+                record.duration_after = Some(end_of_after - current);
+                current = end_of_after;
+            }
+
+            let mut result = if let Some(args) = request.get_args() {
+                let r = PrepareArgs {
+                    args,
+                    mem: &mem,
+                    nodes: nodes.as_ref(),
                 }
-                (None, None) => None,
+                .prepare().await?;
+                let end_of_prepareargs = std::time::Instant::now();
+                record.duration_prepare = Some(end_of_prepareargs - current);
+                current = end_of_prepareargs;
+                Some(r)
+            } else {
+                None
             };
 
             let mut guards = if let Some(x) = result.as_mut() {
@@ -266,6 +254,10 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                 Ok(())
             })
             .await?;
+            let end_of_execution = std::time::Instant::now();
+            record.duration_execution = Some(end_of_execution - current);
+            record.duration_all = Some(end_of_execution - start);
+            metrics.set_record(record);
             blocking_task?;
 
             Ok(guards)
@@ -282,8 +274,8 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                 .await
             {
                 Ok(Ok(x)) => {
-                    for s in x {
-                        let _ = s.send(());
+                    for mut s in x {
+                        s.send(());
                     }
                 }
                 Ok(Err(err)) => match err {
@@ -313,7 +305,19 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         pickle: PyObject,
         current_node: &str,
         modules: &Arc<DashMap<String, PyObject>>,
+        metrics: &crate::metrics::ExecutionMeter
     ) -> crate::error::Result<NodeObject> {
+        let mut record = SingleCommand {
+            cmd: T::NAME,
+            duration_all: None,
+            duration_execution: None,
+            duration_get_target_object: None,
+            duration_after: None,
+            duration_prepare: None
+        };
+        let start = std::time::Instant::now();
+        let mut current = start.clone();
+
         match self.request.get_option().map(|x| &x.after) {
             Some(after) => {
                 After {
@@ -323,12 +327,19 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                     current_node: current_node.as_ref(),
                 }
                 .wait().await?;
+                let end_of_after = std::time::Instant::now();
+                record.duration_after = Some(end_of_after - current);
+                current = end_of_after;
             }
             _ => {}
         };
 
         let mut result = if let Some(args) = self.request.get_args() {
-            Some(PrepareArgs { args, mem, nodes }.prepare().await?)
+            let r = PrepareArgs { args, mem, nodes }.prepare().await?;
+            let end_of_prepare = std::time::Instant::now();
+            record.duration_prepare = Some(end_of_prepare - current);
+            current = end_of_prepare;
+            Some(r)
         } else {
             None
         };
@@ -342,6 +353,9 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         let o = match self.request.get_target_object() {
             CommandTarget::Object(id) => {
                 let (obj, s) = mem.get(id).await;
+                let end_of_get_target_object = std::time::Instant::now();
+                record.duration_get_target_object = Some(end_of_get_target_object - current);
+                current = end_of_get_target_object;
                 guards.push(s);
                 Some(obj.ok_or(anyhow::anyhow!(format!(
                     "command target object {} not found",
@@ -415,8 +429,13 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
         })
         .await?;
 
-        for s in guards {
-            let _ = s.send(());
+        let end_of_execution = std::time::Instant::now();
+        record.duration_execution = Some(end_of_execution - current);
+        record.duration_all = Some(end_of_execution - start);
+        metrics.set_record(record);
+
+        for mut s in guards {
+            s.send(());
         }
 
         r

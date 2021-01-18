@@ -13,7 +13,8 @@ use pyo3::{
     types::{IntoPyDict, PyBytes, PyDict, PyList, PyTuple, PyType},
     AsPyPointer, PyNativeType, PyTypeInfo,
 };
-use std::collections::hash_map::DefaultHasher;
+use tower::util::service_fn;
+use std::{collections::hash_map::DefaultHasher, convert::TryFrom};
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::atomic::Ordering;
@@ -25,10 +26,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{command::after::After, utils::*};
+use crate::{command::after::After, metrics::{CounterTcpStream, TrafficCounter}, utils::*};
 use crate::{distributed, mem::LazyPyObject};
 use tokio::task;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, transport::{Endpoint, Uri}};
 use tracing::{debug, event, info, instrument, log::warn, span, Level};
 use tracing_futures::*;
 use uuid;
@@ -41,8 +42,7 @@ pub struct IrisServer {
     pub pickle: PyObject,
     pub current_node: Arc<String>,
     pub metrics: crate::metrics::ExecutionMeter,
-    pub clock: quanta::Clock,
-    pub last_exception: Arc<Mutex<Option<PyObject>>>,
+    pub traffic: crate::metrics::DistributedTraffic
 }
 
 impl IrisServer {
@@ -64,79 +64,48 @@ impl IrisServer {
 
         let state = &self.modules;
         for module_name in modules {
-            info!("import.. {}", module_name);
+            // info!("import.. {}", module_name);
             let py = py.import(module_name.as_str())?;
             state.insert(module_name, Py::from(py));
         }
 
         Ok(())
     }
-
-    // TODO: Optimize?
-    #[instrument(skip(self, fetch_list))]
-    async fn fetch_remote(&self, fetch_list: &Vec<NodeObjectRef>) -> HashMap<u64, u64> {
-        // let span = span!(Level::TRACE, "fetch");
-        // let _g = span.enter();
-        if fetch_list.len() == 0 {
-            return Default::default();
-        }
-        event!(Level::DEBUG, fetch_list=?fetch_list);
-        let mut bytes_c = 0;
-        let start = std::time::Instant::now();
-        let mut nodes = Vec::with_capacity(fetch_list.len());
-        for n in fetch_list {
-            let node: &distributed::DistributedClient =
-                &self.nodes.get(&n.location).expect(&n.location);
-            let node = node.clone();
-            nodes.push((node, n));
-        }
-        let tasks = nodes.iter_mut().map(|(node, o)| {
-            let mut hasher = DefaultHasher::new();
-            let id = uuid::Uuid::new_v4();
-            id.hash(&mut hasher);
-            let id = hasher.finish();
-            let obj = o.clone();
-            node.get_object(tonic::Request::new(n2n::NodeObjectRef {
-                id: o.id,
-                attr: o.attr.clone(),
-                location: o.location.clone(),
-            }))
-            .map(move |x| (id, x.unwrap().into_inner(), obj))
-        });
-        let result: Vec<(u64, n2n::Value, NodeObjectRef)> = futures::future::join_all(tasks).await;
-        let mut ret = HashMap::new();
-        for (id, b, r) in result {
-            self.objects
-                .insert(Some(id), LazyPyObject::new_serialized(Bytes::from(b.data)));
-            ret.insert(r.id, id);
-        }
-
-        let end = std::time::Instant::now();
-        info!("{:?}, bytes {}", end - start, bytes_c);
-        return ret;
-    }
 }
 
 #[tonic::async_trait]
 impl Greeter for IrisServer {
-    async fn say_hello(
-        &self,
-        request: Request<HelloRequest>,
-    ) -> Result<Response<HelloReply>, Status> {
-        let _request = request.into_inner();
-        unimplemented!()
+    async fn close(&self, request: Request<Null>) -> Result<Response<Null>, Status> {
+        info!("Metrics: {:#?}", self.metrics);
+        info!("Traffic: {:#?}", self.traffic);
+        self.objects.clear();
+        self.modules.clear();
+        self.nodes.clear();
+        self.nodes_addr.clear();
+        return Ok(Response::new(Null {}));
     }
 
     async fn connect_nodes(
         &self,
         request: Request<ConnectRequest>,
-    ) -> Result<Response<HelloReply>, Status> {
+    ) -> Result<Response<Null>, Status> {
         // let addr = request.remote_addr().unwrap();
         let request = request.into_inner();
         for node in request.nodes {
-            let mut client = distributed::connect(format!("http://{}", node.address))
-                .await
-                .unwrap();
+            let counter = TrafficCounter::default();
+            self.traffic.nodes.insert(node.address.parse().unwrap(), counter.clone());
+            let channel = Endpoint::try_from(format!("http://{}", node.address)).unwrap().connect_with_connector(service_fn(move|u:Uri| {
+                let c = counter.clone();
+                tokio::net::TcpStream::connect(format!("{}:{}",u.host().unwrap(), u.port_u16().unwrap())).map(|x|{
+                    x.map(|t|{
+                        t.set_nodelay(true).unwrap();
+                        CounterTcpStream(t, c)
+                    })
+                })
+                // let r:Result<_,std::io::Error> = Ok(crate::metrics::CounterTcpStream(tcpstream, TrafficCounter::default()));
+                // r
+            })).await.unwrap();
+            let mut client = distributed::DistributedClient::new(channel);
             let reply = client
                 .hello(n2n::HelloRequest {
                     name: self.current_node.as_str().to_owned(),
@@ -145,7 +114,7 @@ impl Greeter for IrisServer {
             info!("connected to {}", node.name);
             self.nodes.insert(node.name.clone(), client);
         }
-        return Ok(Response::new(HelloReply { message: "".into() }));
+        return Ok(Response::new(Null {}));
     }
 
     async fn init(&self, request: Request<InitRequest>) -> Result<Response<NodeObject>, Status> {
@@ -173,7 +142,6 @@ impl Greeter for IrisServer {
 
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<NodeObject>, Status> {
         let request: CallRequest = request.into_inner();
-        info!("receive call request {}", request.object_id);
         let result =
             crate::command::ControlCommandTask::<crate::command::call::CallCommand>::new(request)
                 .run(self)
@@ -191,8 +159,6 @@ impl Greeter for IrisServer {
         &self,
         request: Request<CreateRequest>,
     ) -> Result<Response<NodeObject>, Status> {
-        // let clock = quanta::Clock::new();
-        let start = self.clock.start();
         let request = request.into_inner();
         let result = crate::command::ControlCommandTask::<
             crate::command::create_object::CreateObjectCommand,
@@ -210,8 +176,7 @@ impl Greeter for IrisServer {
     }
 
     async fn apply(&self, request: Request<ApplyRequest>) -> Result<Response<NodeObject>, Status> {
-        let start = std::time::Instant::now();
-        let mut request = request.into_inner();
+        let request = request.into_inner();
         let result =
             crate::command::ControlCommandTask::<crate::command::apply::ApplyCommand>::new(request)
                 .run(self)
@@ -226,8 +191,7 @@ impl Greeter for IrisServer {
     }
 
     async fn send(&self, request: Request<SendRequest>) -> Result<Response<NodeObject>, Status> {
-        let start = std::time::Instant::now();
-        let mut request = request.into_inner();
+        let request = request.into_inner();
         let result =
             crate::command::ControlCommandTask::<crate::command::send::SendCommand>::new(request)
                 .run(self)
@@ -252,6 +216,7 @@ impl Greeter for IrisServer {
             nodes: &self.nodes,
             current_node: self.current_node.as_ref(),
             pickle: &self.pickle,
+            metrics:&self.metrics
         }.run().await;
         match result {
             Ok(r) => Ok(Response::new(r)),
@@ -285,15 +250,13 @@ impl Greeter for IrisServer {
     async fn del_object(
         &self,
         request: Request<DelRequest>,
-    ) -> Result<Response<HelloReply>, Status> {
-        let start = std::time::Instant::now();
+    ) -> Result<Response<Null>, Status> {
         let request = request.into_inner();
         let id = request.object_id;
-        info!("receive del request {}", id);
         let maps = &self.objects;
         match request.options {
             Some(option) => {
-                After {
+                let _ = After {
                     objects: &option.after,
                     mem: &self.objects,
                     nodes: &self.nodes,
@@ -313,15 +276,13 @@ impl Greeter for IrisServer {
             }
         }
 
-        return Ok(Response::new(HelloReply {
-            message: "123".to_string()
-        }));
+        return Ok(Response::new(Null {}));
     }
 
     async fn get_value(&self, request: Request<NodeObjectRef>) -> Result<Response<Value>, Status> {
         let request = request.into_inner();
         let maps = self.objects.clone();
-        let (obj, s) = maps.get(request.id).await;
+        let (obj, mut s) = maps.get(request.id).await;
         let obj = obj.unwrap();
         let pickle = self.pickle.clone();
         let data = tokio::time::timeout(

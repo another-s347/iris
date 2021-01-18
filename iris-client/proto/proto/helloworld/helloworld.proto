@@ -6,21 +6,19 @@ option java_outer_classname = "HelloWorldProto";
 
 package helloworld;
 
-// The greeting service definition.
 service Greeter {
-  // Sends a greeting
-  rpc SayHello (HelloRequest) returns (HelloReply) {}
   rpc CreateObject (CreateRequest) returns (NodeObject) {}
-  rpc ConnectNodes (ConnectRequest) returns (HelloReply) {}
+  rpc ConnectNodes (ConnectRequest) returns (Null) {}
   rpc Init (InitRequest) returns (NodeObject) {}
   rpc Call (CallRequest) returns (NodeObject) {}
   rpc Apply (ApplyRequest) returns (NodeObject) {}
   rpc Send(SendRequest) returns (NodeObject) {}
   rpc GetAttr(GetAttrRequest) returns (NodeObject) {}
   rpc GetValue(NodeObjectRef) returns (Value) {}
-  rpc DelObject(DelRequest) returns (HelloReply) {}
+  rpc DelObject(DelRequest) returns (Null) {}
   rpc GetRemoteObject(GetRemoteObjectRequest) returns (NodeObject) {}
   rpc SyncObject(SyncRequest) returns (NodeObject) {}
+  rpc Close(Null) returns (Null) {}
 }
 
 // message RemoteResult {
@@ -28,14 +26,8 @@ service Greeter {
 //   map<uint64, uint64> fetch_result = 2;
 // }
 
-// The request message containing the user's name.
-message HelloRequest {
-  string name = 1;
-}
+message Null {
 
-// The response message containing the greetings
-message HelloReply {
-  string message = 1;
 }
 
 message SyncRequest {

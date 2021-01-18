@@ -13,7 +13,7 @@ tokio = { version="0.2", features = ["full"] }
 tonic = "0.2"
 futures = "0.3"
 prost = "0.6"
-tower = "*"
+tower = { version="0.4.3", features=["util"] }
 uuid = { version="0.8", features = ["v4"] }
 common = { path="../common" }
 proto = { path="../proto" }

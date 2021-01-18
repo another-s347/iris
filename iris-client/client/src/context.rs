@@ -17,7 +17,7 @@ use tokio::runtime;
 
 use tonic;
 use tonic::transport::{Endpoint, Uri};
-use tower::service_fn;
+use tower::util::service_fn;
 
 
 type RpcClient = GreeterClient<tonic::transport::channel::Channel>;
@@ -76,7 +76,6 @@ impl IrisContextInternal {
             mem: crate::ClientMem {}
         })
     }
-
 }
 
 fn setup_global_subscriber(debug:bool, log_color: bool) {

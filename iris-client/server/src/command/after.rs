@@ -26,7 +26,7 @@ impl<'a> After<'a> {
                 let client = self
                     .nodes
                     .get(&o.location)
-                    .ok_or(anyhow!("node {} not connected", o.location))?;
+                    .ok_or(anyhow!("after {:#?} at {}:node {} not connected", o, self.current_node, o.location))?;
                 let client = client.value().clone();
                 remote_tasks.push((client, o));
             } else {

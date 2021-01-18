@@ -6,6 +6,20 @@ from torch import optim
 import asyncio
 from inspect import getframeinfo, stack
 import functools
+import contextvars
+import threading
+
+class ControlContext:
+    def __init__(self, cid):
+        self.last_task = []
+        self.cid = cid
+        pass
+
+    def set_last_task(self, task):
+        self.last_task = [task]
+
+    def get_last_task(self):
+        return self.last_task
 
 class IrisConfig:
     def __init__(self):
@@ -20,7 +34,10 @@ class IrisContext:
         self.inner = IrisContextInternal(config)
         self.client_wrapper = {}
         self.config = config if config else IrisConfig()
-        self.last_task = None
+        self.ports = 12345
+        self.control_context = contextvars.ContextVar("control_context")
+        self.control_context.set(ControlContext(65536))
+        # print(threading.get_ident())
 
     def setup(self):
         self.client_wrapper["node0"] = IrisClientWrapper(self.inner.connect(
@@ -44,6 +61,36 @@ class IrisContext:
         inner_client = self.client_wrapper[node]
         return inner_client.create_object(module,  *args, **kwargs)
 
+    def create_node(self, name ,ip="127.0.0.1", port=None):
+        port = port if port else self.ports
+        self.ports += 1
+        stub = IrisClientWrapper(self.inner.connect(
+            f"/tmp/iris-tmp-node-{ip}-{port}.sock", f"node{ip}:{port}"), name, self
+        )
+        self.client_wrapper[name] = stub
+        self.client_wrapper[name].inner.init(
+            modules=list(sys.modules.keys()), path=sys.path, rank=len(self.client_wrapper)-1
+        )
+        return IrisNode(name, ip, port, stub)
+
+    def close(self):
+        for client in self.client_wrapper.values():
+            client.close()
+
+class IrisNode:
+    def __init__(self, name, ip, port, stub):
+        self.name = name
+        self.ip = ip
+        self.port = port
+        self.stub = stub
+        self.internal_name = f"node{ip}:{port}"
+
+    def connect(self, node1, bi=False):
+        self.stub.inner.connect_nodes({
+            node1.internal_name: f"{node1.ip}:{node1.port}"
+        })
+        if bi:
+            node1.connect(self, bi=False)
 class IrisObject:
     def __init__(self, inner, node, ctx, args, kwargs, attrs=[], i_stack=1):
         super().__init__()
@@ -57,7 +104,6 @@ class IrisObject:
         self.kwargs = kwargs
         self.attrs = attrs
         self.source = getframeinfo(stack()[i_stack][0]) if self.ctx.config.debug else None
-        self.log("create", i_stack=i_stack+1)
 
     def log(self, msg, i_stack=2):
         if self.ctx.config.debug:
@@ -94,13 +140,14 @@ class IrisObject:
             pickle=dill,
             attr=self.attrs,
             go_async=self.ctx.config.go_async,
-            after_list = self.ctx.last_task
+            after_list = self.ctx.control_context.get().get_last_task()
         )
         if self.ctx.config.go_async_sequence:
-            self.ctx.last_task = [r.id()]
+            self.ctx.control_context.get().set_last_task(r.id())
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
+        self.log(f"CALL => {r.id().id}", i_stack=2)
         return IrisObject(r, self.node, self.ctx, args, kwargs, i_stack=2)
 
     def _call_with_attr(self, attr, go_async, args, kwargs={}, i_stack=3):
@@ -109,19 +156,19 @@ class IrisObject:
                 return getattr(self.value, attr)()
             return getattr(self.value, attr)(*args)
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
-        self.log("call with attr", i_stack)
         r = self.inner.call(
             b_args=r_args,
             b_kwargs=kwargs,
             attr=[*self.attrs,attr], pickle=dill,
             go_async=go_async,
-            after_list = self.ctx.last_task
+            after_list = self.ctx.control_context.get().get_last_task()
         )
         if self.ctx.config.go_async_sequence:
-            self.ctx.last_task = [r.id()]
+            self.ctx.control_context.get().set_last_task(r.id())
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
+        self.log(f"CALLATTR {attr} => {r.id().id}", i_stack=i_stack)
         return IrisObject(r, self.node, self.ctx, args, kwargs, i_stack=i_stack)
 
     def keys(self):
@@ -135,12 +182,13 @@ class IrisObject:
     def __getattr__(self, attr):
         # TODO: add options
         if True:
-            r = self.inner.get_attr([attr],go_async=self.ctx.config.go_async,after_list = self.ctx.last_task)
+            r = self.inner.get_attr([attr],go_async=self.ctx.config.go_async,after_list = self.ctx.control_context.get().get_last_task())
             if r.exception():
                 exception = dill.loads(r.exception())
                 raise exception
             if self.ctx.config.go_async_sequence:
-                self.ctx.last_task = [r.id()]
+                self.ctx.control_context.get().set_last_task(r.id())
+            self.log(f"GETATTR {attr} => {r.id().id}", i_stack=2)
             return IrisObject(r, self.node, self.ctx, None, None, i_stack=2)
         else:
             return IrisObject(self.inner.clone(), self.node, self.ctx, None, None, [*self.attrs, attr], i_stack=2)
@@ -190,7 +238,7 @@ class IrisObject:
 
     def __del__(self):
         self.log("del",i_stack=None)
-        self.inner.del_obj(go_async=self.ctx.config.go_async,after_list = self.ctx.last_task)
+        self.inner.del_obj(go_async=self.ctx.config.go_async,after_list = self.ctx.control_context.get().get_last_task())
 
 class AsyncIterator:
     def __init__(self, inner):
@@ -328,6 +376,7 @@ class IrisClientWrapper:
         return self.inner.batch_wait([m.inner for m in tasks])
 
     def create_object(self, module,  *args, **kwargs):
+        # print(threading.get_ident())
         r_args, holds_ref = retrieve_args(self, self.node, self.ctx, args)
         r = self.inner.create_object(
             module=module.__module__,
@@ -336,10 +385,10 @@ class IrisClientWrapper:
             b_kwargs=kwargs,
             pickle=dill,
             go_async=self.ctx.config.go_async,
-            after_list = self.ctx.last_task
+            after_list = self.ctx.control_context.get().get_last_task()
         )
         if self.ctx.config.go_async_sequence:
-            self.ctx.last_task = [r.id()]
+            self.ctx.control_context.get().set_last_task(r.id())
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
@@ -354,10 +403,10 @@ class IrisClientWrapper:
             b_kwargs=kwargs,
             pickle=dill,
             go_async=self.ctx.config.go_async,
-            after_list = self.ctx.last_task
+            after_list = self.ctx.control_context.get().get_last_task()
         )
         if self.ctx.config.go_async_sequence:
-            self.ctx.last_task = [r.id()]
+            self.ctx.control_context.get().set_last_task(r.id())
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
@@ -365,13 +414,16 @@ class IrisClientWrapper:
 
     def get_remote_object(self, obj):
         r = self.inner.get_remote_object(obj.inner,go_async=self.ctx.config.go_async,
-            after_list = self.ctx.last_task)
+            after_list = self.ctx.control_context.get().get_last_task())
         if self.ctx.config.go_async_sequence:
-            self.ctx.last_task = [r.id()]
+            self.ctx.control_context.get().set_last_task(r.id())
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
         return IrisObject(r, self.node, self.ctx, None, None, i_stack=2)
+
+    def close(self):
+        self.inner.close()
 
 
 
@@ -407,9 +459,9 @@ class RemoteFunction:
 
     def to_node(self, node):
         r = self.ctx.client_wrapper[node].inner.send(self.func_bytes, go_async=self.ctx.config.go_async,
-            after_list = self.ctx.last_task)
+            after_list = self.ctx.control_context.get().get_last_task())
         if self.ctx.config.go_async_sequence:
-            self.ctx.last_task = [r.id()]
+            self.ctx.control_context.get().set_last_task(r.id())
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
