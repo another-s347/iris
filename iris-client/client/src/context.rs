@@ -6,7 +6,7 @@ use tracing::info;
 use tracing_subscriber::{Registry, fmt, prelude::__tracing_subscriber_SubscriberExt};
 
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use std::convert::TryFrom;
 
 
@@ -37,7 +37,7 @@ async fn _connect(address: String) -> Result<RpcClient, tonic::transport::Error>
 
 #[pyclass(module = "client")]
 pub struct IrisContextInternal {
-    pub runtime: tokio::runtime::Runtime,
+    pub runtime: Arc<tokio::runtime::Runtime>,
     pub nodes: HashMap<i32, i32>,
 }
 
@@ -50,11 +50,11 @@ impl IrisContextInternal {
         setup_global_subscriber(d, log_color);
         info!("Debug: {:#?}, Log with color: {}", d, log_color);
 
-        let basic_rt = runtime::Builder::new()
-            .threaded_scheduler()
+        let basic_rt = runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
+        let basic_rt = Arc::new(basic_rt);
 
         Ok(IrisContextInternal {
             runtime: basic_rt,
@@ -69,7 +69,7 @@ impl IrisContextInternal {
             self.runtime.block_on(handle)
         }).unwrap();
         Ok(crate::IrisClientInternal {
-            runtime_handle: self.runtime.handle().clone(),
+            runtime_handle: self.runtime.clone(),
             client: client.unwrap(),
             async_tasks: Default::default(),
             node,

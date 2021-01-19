@@ -1,11 +1,17 @@
-use std::{time::Duration, net::SocketAddr, pin::Pin, sync::{atomic::Ordering, Arc}, task::{Poll, Context}};
 use dashmap::DashMap;
-use tokio::io::{AsyncWrite, AsyncRead};
-use std::sync::atomic::{AtomicUsize, AtomicU64};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::{
+    net::SocketAddr,
+    pin::Pin,
+    sync::{atomic::Ordering, Arc},
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Clone)]
 pub struct DistributedTraffic {
-    pub nodes: Arc<DashMap<SocketAddr, TrafficCounter>>
+    pub nodes: Arc<DashMap<SocketAddr, TrafficCounter>>,
 }
 
 impl std::fmt::Debug for DistributedTraffic {
@@ -23,7 +29,7 @@ impl std::fmt::Debug for DistributedTraffic {
 impl DistributedTraffic {
     pub fn new() -> Self {
         Self {
-            nodes: Arc::new(DashMap::new())
+            nodes: Arc::new(DashMap::new()),
         }
     }
 }
@@ -33,12 +39,19 @@ pub struct TrafficCounter {
     pub in_pkts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub out_pkts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub in_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    pub out_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>
+    pub out_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for TrafficCounter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f,"OUT {} pkts {} bytes, IN {} pkts {} bytes", self.out_pkts.load(Ordering::SeqCst), self.out_bytes.load(Ordering::SeqCst), self.in_pkts.load(Ordering::SeqCst), self.in_bytes.load(Ordering::SeqCst))?;
+        write!(
+            f,
+            "OUT {} pkts {} bytes, IN {} pkts {} bytes",
+            self.out_pkts.load(Ordering::SeqCst),
+            self.out_bytes.load(Ordering::SeqCst),
+            self.in_pkts.load(Ordering::SeqCst),
+            self.in_bytes.load(Ordering::SeqCst)
+        )?;
 
         Ok(())
     }
@@ -53,21 +66,22 @@ impl tonic::transport::server::Connected for CounterTcpStream {
 }
 
 impl AsyncRead for CounterTcpStream {
-    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut [u8])
-            -> std::task::Poll<std::io::Result<usize>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let size_before = buf.filled().len();
         match Pin::new(&mut self.0).poll_read(cx, buf) {
-            Poll::Ready(Ok(size)) => {
+            Poll::Ready(Ok(())) => {
+                let size = buf.filled().len() - size_before;
                 let counter = &self.1;
                 counter.in_bytes.fetch_add(size, Ordering::SeqCst);
                 counter.in_pkts.fetch_add(1, Ordering::SeqCst);
-                Poll::Ready(Ok(size))
+                Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(e)) => {
-                Poll::Ready(Err(e))
-            }
-            Poll::Pending => {
-                Poll::Pending
-            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -78,10 +92,10 @@ impl AsyncWrite for CounterTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let r= Pin::new(&mut self.0).poll_write(cx, buf);
+        let r = Pin::new(&mut self.0).poll_write(cx, buf);
         if let Poll::Ready(Ok(len)) = r {
             let counter = &self.1;
-            if counter.out_bytes.fetch_add(len, Ordering::SeqCst) > usize::MAX-len {
+            if counter.out_bytes.fetch_add(len, Ordering::SeqCst) > usize::MAX - len {
                 println!("{}, {}", counter.out_bytes.load(Ordering::SeqCst), len);
                 unimplemented!()
             }
@@ -94,10 +108,7 @@ impl AsyncWrite for CounterTcpStream {
         Pin::new(&mut self.0).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.0).poll_shutdown(cx)
     }
 }
@@ -110,7 +121,7 @@ pub struct ExecutionMeter {
     pub get_remote_object: Record,
     pub create_object: Record,
     pub apply: Record,
-    pub total: Record
+    pub total: Record,
 }
 
 impl ExecutionMeter {
@@ -153,7 +164,7 @@ pub struct Record {
     pub count_execution: Arc<AtomicU64>,
     pub count_get_target_object: Arc<AtomicU64>,
     pub count_after: Arc<AtomicU64>,
-    pub count_prepare: Arc<AtomicU64>
+    pub count_prepare: Arc<AtomicU64>,
 }
 
 #[macro_use]
@@ -164,12 +175,27 @@ macro_rules! write_field {
             let count = $self.[<count_$i>].load(Ordering::SeqCst);
         }
         if count == 0 {
-            (&mut $f).field(stringify!($i), &format!("total {:.2}s, avg {:.2}ms, count {}", sum as f64 / 1_000f64, 0, 0));
+            (&mut $f).field(
+                stringify!($i),
+                &format!(
+                    "total {:.2}s, avg {:.2}ms, count {}",
+                    sum as f64 / 1_000f64,
+                    0,
+                    0
+                ),
+            );
+        } else {
+            (&mut $f).field(
+                stringify!($i),
+                &format!(
+                    "total {:.2}s, avg {:.2}ms, count {}",
+                    sum as f64 / 1_000f64,
+                    sum as f64 / count as f64,
+                    count
+                ),
+            );
         }
-        else {
-            (&mut $f).field(stringify!($i), &format!("total {:.2}s, avg {:.2}ms, count {}", sum as f64 / 1_000f64, sum as f64 / count as f64, count));
-        }
-    }
+    };
 }
 
 impl std::fmt::Debug for Record {
@@ -194,7 +220,7 @@ macro_rules! add {
                 $self.[<duration_$i>].fetch_add(d.as_millis() as u64, Ordering::SeqCst);
             }
         }
-    }
+    };
 }
 
 impl Record {
@@ -214,5 +240,5 @@ pub struct SingleCommand {
     pub duration_execution: Option<Duration>,
     pub duration_get_target_object: Option<Duration>,
     pub duration_after: Option<Duration>,
-    pub duration_prepare: Option<Duration>
+    pub duration_prepare: Option<Duration>,
 }

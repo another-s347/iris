@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         current_node: Arc::new(format!("node{}:{}", opt.address, opt.port)),
         nodes_addr: addrs,
         metrics: metrics.clone(),
-        traffic: traffic.clone()
+        traffic: traffic.clone(),
     };
 
     let (tx, mut rx) = tokio::sync::broadcast::channel(1);
@@ -136,29 +136,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     }
     // }.instrument(tracing::info_span!("profile")));
 
+    let incoming = async_stream::stream! {
+        while let item = uds.accept().map_ok(|(st, _)| unix::UnixStream(st)).await {
+            yield item;
+        }
+    };
+
+    let tcp_incoming = async_stream::stream! {
+        while let item = tcp.accept().map_ok(|(x, _)| {
+            let counter = metrics::TrafficCounter::default();
+                traffic
+                    .nodes
+                    .insert(x.peer_addr().unwrap(), counter.clone());
+                x.set_nodelay(true).unwrap();
+                CounterTcpStream(x, counter)
+        }).await {
+            yield item;
+        }
+    };
+
     let server_iris = Server::builder()
         .add_service(GreeterServer::new(greeter))
         // .serve_with_shutdown("127.0.0.1:12345".parse().unwrap(), rx.recv().map(|_|()))
-        .serve_with_incoming_shutdown(
-            uds.incoming().map_ok(unix::UnixStream),
-            rx.recv().map(|_| ()),
-        );
+        .serve_with_incoming_shutdown(incoming, rx.recv().map(|_| ()));
 
     let t2 = tokio::spawn(async move {
         let server_n2n = Server::builder()
             // .concurrency_limit_per_connection(4096)
             .add_service(proto::n2n::n2n_server::N2nServer::new(distributed_server))
-            .serve_with_incoming_shutdown(
-                tcp.incoming().map_ok(|x| {
-                    let counter = metrics::TrafficCounter::default();
-                    traffic
-                        .nodes
-                        .insert(x.peer_addr().unwrap(), counter.clone());
-                    x.set_nodelay(true).unwrap();
-                    CounterTcpStream(x, counter)
-                }),
-                rx2.recv().map(|_| ()),
-            );
+            .serve_with_incoming_shutdown(tcp_incoming, rx2.recv().map(|_| ()));
         server_n2n.await
     });
 
@@ -197,10 +203,8 @@ fn setup_global_subscriber(color: bool) {
     //     .with_ansi(false)
     //     .with_writer(|| tracing_appender::rolling::never(".", "prefix.log"));
 
-    let subscriber = Registry::default()
-        .with(filter)
-        .with(fmt_layer);
-        // .with(file_layer);
+    let subscriber = Registry::default().with(filter).with(fmt_layer);
+    // .with(file_layer);
 
     tracing::subscriber::set_global_default(subscriber).expect("Could not set global default");
 }
@@ -224,8 +228,8 @@ mod unix {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
-            buf: &mut [u8],
-        ) -> Poll<std::io::Result<usize>> {
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
             Pin::new(&mut self.0).poll_read(cx, buf)
         }
     }

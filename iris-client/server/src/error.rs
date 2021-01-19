@@ -36,7 +36,7 @@ pub enum Error {
     #[error("tokio timeout error: {source:#?}")]
     TimeoutError{
         #[from]
-        source: tokio::time::Elapsed,
+        source: tokio::time::error::Elapsed,
         backtrace: Backtrace,
     }
 }

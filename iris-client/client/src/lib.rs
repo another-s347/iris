@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::prelude::*;
+// use tokio::prelude::*;
 
 
 use tokio::task::JoinHandle;
@@ -49,7 +49,7 @@ struct WordCounter {
 
 #[pyclass(module = "client")]
 struct IrisClientInternal {
-    pub runtime_handle: tokio::runtime::Handle,
+    pub runtime_handle: Arc<tokio::runtime::Runtime>,
     pub client: RpcClient,
     pub async_tasks: HashMap<uuid::Uuid, AsyncIrisObjectTask>,
     pub node: String,
@@ -73,7 +73,7 @@ struct IrisObjectInternal {
 }
 
 struct GuardedIrisObject {
-    pub runtime_handle: tokio::runtime::Handle,
+    pub runtime_handle: Arc<tokio::runtime::Runtime>,
     pub client: RpcClient,
     pub node_ref: NodeObject,
     pub time_cost: Duration,
