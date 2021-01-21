@@ -74,7 +74,7 @@ class OnContext:
 
     def __exit__(self, exc_type, exc_value, exc_tracebackc):
         cc = self.node.ctx.control_context.get()
-        assert(self.current_cid, cc.cid)
+        assert self.current_cid == cc.cid
         cc.current_node = self.last_node
 
     def __call__(self, module):
@@ -119,7 +119,6 @@ class IrisContext:
         self.control_context: contextvars.ContextVar[ControlContext] = contextvars.ContextVar(
             "control_context")
         self.control_context.set(ControlContext(65536))
-        # print(threading.get_ident())
 
     def setup(self):
         n0 = self.create_node("node0", "127.0.0.1", port=12345)
@@ -164,6 +163,9 @@ class IrisNode:
         if bi:
             node1.connect(self, bi=False)
 
+    def __repr__(self) -> str:
+        return f"{self.name}#{self.internal_name}"
+
     def create_object_by_name(self, module_name, qual_name,  *args, **kwargs) -> 'IrisObject':
         r_args, holds_ref = retrieve_args(self, self.ctx, args)
         r = self.stub.create_object(
@@ -180,11 +182,9 @@ class IrisNode:
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
-        # print("time cost", r.time_cost_as_sec())
         return IrisObject(r, self, self.ctx, args, kwargs, i_stack=3)
 
     def create_object(self, module,  *args, **kwargs) -> 'IrisObject':
-        # print(threading.get_ident())
         r_args, holds_ref = retrieve_args(self, self.ctx, args)
         r = self.stub.create_object(
             module=module.__module__,
@@ -200,7 +200,6 @@ class IrisNode:
         if r.exception():
             exception = dill.loads(r.exception())
             raise exception
-        # print("time cost", r.time_cost_as_sec())
         return IrisObject(r, self, self.ctx, args, kwargs, i_stack=3)
 
     def apply(self, func, args, kwargs) -> 'IrisObject':
@@ -386,6 +385,14 @@ class IrisObject:
         self.inner.del_obj(go_async=self.ctx.config.go_async,
                            after_list=self.ctx.control_context.get().get_last_task())
 
+class IrisObjectWrapper:
+    def __init__(self, object) -> None:
+        super().__init__()
+        self.object = object
+        self.node = object.node
+
+    def get(self):
+        return self.object.get()
 
 class AsyncIterator:
     def __init__(self, inner):
@@ -415,13 +422,13 @@ class RemoteTensorGroup:
     def __init__(self):
         super().__init__()
         self.inputs = []
-        self.outputs = {}
+        self.outputs: dict[Any, Any] = {}
 
     def add_input(self, source, this):
         source.incr_output()
         self.inputs.append((this, source))
 
-    def add_output(self, tensor):
+    def add_output(self, tensor: 'IrisObject'):
         object_id = tensor.id.id
         if object_id in self.outputs:
             self.outputs[object_id][0] += 1
@@ -429,6 +436,8 @@ class RemoteTensorGroup:
             self.outputs[object_id] = [0, tensor]
 
     def backward(self, tensor, grad):
+        if isinstance(tensor, IrisObjectWrapper):
+            tensor = tensor.object
         object_id = tensor.id.id
         if self.outputs[object_id][0] == 1:
             self.outputs[object_id][1].backward(grad)
@@ -439,30 +448,29 @@ class RemoteTensorGroup:
             input_source.backward(input_this.grad)
 
 
-class RemoteTensor:
-    def __init__(self, inner, group=None):
-        super().__init__()
-        self.inner = inner
+class RemoteTensor(IrisObjectWrapper):
+    def __init__(self, inner: IrisObject, group=None):
+        super(RemoteTensor, self).__init__(inner)
         self.group = group if group else RemoteTensorGroup()
         self.parents = [p[1] for p in self.group.inputs]
-        self.node = inner.node
 
     def incr_output(self):
-        self.group.add_output(self.inner)
+        self.group.add_output(self.object)
 
     def backward(self, grad=None):
-        print(f"backward on {self.inner}")
+        # print(f"backward on {self.object}")
         # if grad is not None:
         #     print(grad.get())
         # else:
         #     print("none")
         # print("none" if not grad else grad.get())
-        self.group.backward(self.inner, grad)
+        self.group.backward(self, grad)
 
     def sum(self):
-        ret = self.inner.sum()
+        ret = self.object.sum()
         self.group.add_output(ret)
-        return RemoteTensor(ret, self.group)
+        ret = RemoteTensor(ret, self.group)
+        return ret
 
 
 class IrisModel:
@@ -475,13 +483,13 @@ class IrisModel:
         input_pair = []
         group = RemoteTensorGroup()
         for a in args:
-            if type(a) is RemoteTensor:
-                if a.inner.node != self.model.node:
-                    this = a.inner.to_node(self.model.node)
+            if isinstance(a, RemoteTensor):
+                if a.object.node != self.model.node:
+                    this = a.object.to_node(self.model.node)
                     group.add_input(a, this)
                     r_args.append(this)
                 else:
-                    r_args.append(a.inner)
+                    r_args.append(a)
             else:
                 r_args.append(a)
         ret = self.model(*r_args)
@@ -499,16 +507,20 @@ def retrieve_args(self, ctx, args, cls=tuple):
     a = []
     holds_ref = []
     for arg in args:
-        if type(arg) is IrisObject:
+        if isinstance(arg, IrisObjectWrapper):
+            x = arg.object.id.add_attr(arg.object.attrs)
+            a.append(x)
+        elif isinstance(arg, IrisObject):
             x = arg.id.add_attr(arg.attrs)
             a.append(x)
-        elif type(arg) is list:
+        elif isinstance(arg, list):
             rr = retrieve_args(self, ctx, a,  list)
             holds_ref.extend(rr[1])
             a.append(rr[0])
-        elif type(arg) is dict:
-            raise NotImplementedError()
-        elif type(arg) is tuple:
+        elif isinstance(arg, dict):
+            a.append(arg)
+            # raise NotImplementedError(arg)
+        elif isinstance(arg, tuple):
             rr = retrieve_args(self, ctx,  a)
             holds_ref.extend(rr[1])
             a.append(rr[0])
@@ -534,6 +546,54 @@ class RemoteFunction:
             raise exception
         self.cache_objects[node] = IrisObject(
             r, node, ctx, None, None, i_stack=2)
+
+    def on(self, node: 'IrisNode'):
+        if node not in self.cache_objects:
+            self.to_node(node)
+        return self.cache_objects[node]
+
+
+class _RTF:
+    def __init__(self, func_object: IrisObject, node: IrisNode) -> None:
+        super().__init__()
+        self.func_object: IrisObject = func_object
+        self.node: IrisNode = node
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        group = None
+        for a in args:
+            if isinstance(a, RemoteTensor) and a.object.node.name == self.node.name:
+                group = a.group
+                break
+        ret = self.func_object(*args, **kwds)
+        if not isinstance(ret, IrisObject):
+            raise NotImplementedError()
+        if group is None:
+            return ret
+        group.add_output(ret)
+        ret = RemoteTensor(ret, group)
+        return ret
+
+
+class RemoteTensorFunction:
+    def __init__(self, func):
+        self.func = func
+        self.func_bytes = dill.dumps(self.func)
+        self.cache_objects: dict['IrisNode', '_RTF'] = {}
+
+    def to_node(self, node: 'IrisNode'):
+        ctx = node.ctx
+        r = ctx.client_wrapper[node.name].stub.send(self.func_bytes, go_async=ctx.config.go_async,
+                                                    after_list=ctx.control_context.get().get_last_task())
+        if ctx.config.go_async_sequence:
+            ctx.control_context.get().set_last_task(r.id())
+        if r.exception():
+            exception = dill.loads(r.exception())
+            raise exception
+        self.cache_objects[node] = _RTF(
+            IrisObject(r, node, ctx, None, None, i_stack=2), 
+            node
+        )
 
     def on(self, node: 'IrisNode'):
         if node not in self.cache_objects:
