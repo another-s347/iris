@@ -229,6 +229,17 @@ class IrisNode:
             raise exception
         return IrisObject(r, self, self.ctx, None, None, i_stack=2)
 
+    def send(self, obj) -> 'IrisObject':
+        bytes = dill.dumps(obj)
+        r = self.stub.send(bytes, go_async=self.ctx.config.go_async,
+                                                    after_list=self.ctx.control_context.get().get_last_task())
+        if self.ctx.config.go_async_sequence:
+            self.ctx.control_context.get().set_last_task(r.id())
+        if r.exception():
+            exception = dill.loads(r.exception())
+            raise exception
+        return IrisObject(r, self, self.ctx, None, None, i_stack=2)
+
     def close(self):
         self.stub.close()
 
