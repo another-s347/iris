@@ -58,7 +58,7 @@ pub fn map_result(
         Err(e) => {
             let err = dumps(pickle, py, e).unwrap();
             NodeObject {
-                exception: err,
+                exception: err.into(),
                 location: current_node.to_owned(),
                 ..Default::default()
             }
@@ -78,7 +78,7 @@ pub enum LocalObject {
     U32(u32),
     Str(String),
     Object(LazyPyObject, Vec<String>),
-    Bytes(Vec<u8>),
+    Bytes(bytes::Bytes),
     None,
 }
 

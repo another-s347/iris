@@ -141,11 +141,13 @@ class IrisContext:
             modules=list(sys.modules.keys()), path=sys.path, rank=len(self.client_wrapper)-1
         )
         return node
-
+    
     def close(self):
         for client in self.client_wrapper.values():
             client.close()
 
+    def __del__(self):
+        self.close()
 
 class IrisNode:
     def __init__(self, name: str, ip: str, port: int, stub, ctx: 'IrisContext'):

@@ -16,6 +16,7 @@ use crate::{
 };
 use anyhow::Context;
 use dashmap::DashMap;
+use prost::bytes;
 use proto::n2n;
 use pyo3::{PyObject, PyResult, Python};
 use tracing::info;
@@ -124,45 +125,45 @@ impl<'a> GetRemoteRequest<'a> {
         let mem_c = self.mem.clone();
         let current_node = self.current_node.to_string();
         let result: crate::error::Result<NodeObject> = tokio::task::spawn_blocking(move|| {
-            let gil = Python::acquire_gil();
-            let py = gil.python();
-            let result = loads(&pickle, py, result.data.as_ref());
+            Python::with_gil(|py|{
+                let result = loads(&pickle, py, result.data.as_ref());
 
-            let ret:crate::error::Result<_> = match result {
-                Ok(obj) => {
-                    let mut ret = NodeObject {
-                        id,
-                        r#type: obj
-                            .as_ref(py)
-                            .get_type()
-                            .name()
-                            .map_err(|e| anyhow::anyhow!("pyo3 get type name fail: {:#?}", e))?
-                            .to_string(),
-                        location: current_node.to_owned(),
-                        r#async: false,
-                        ..Default::default()
-                    };
-
-                    try_extract_native_value(obj.as_ref(py), &mut ret, &mem_c, &current_node)
-                        .map_err(|e| {
-                            anyhow::anyhow!("try_extract_native_value should not failed:{:#?}", e)
-                        })?;
-                    mem_c.insert(Some(id), LazyPyObject::new_object(obj));
-
-                    Ok(ret)
-                }
-                Err(err) => {
-                    let err = crate::utils::dumps(&pickle, py, err)
-                        .map_err(|e| anyhow::anyhow!("dump failed:{:#?}", e))?;
-                    Ok(NodeObject {
-                        exception: err,
-                        location: current_node.to_owned(),
-                        ..Default::default()
-                    })
-                }
-            };
+                let ret:crate::error::Result<_> = match result {
+                    Ok(obj) => {
+                        let mut ret = NodeObject {
+                            id,
+                            r#type: obj
+                                .as_ref(py)
+                                .get_type()
+                                .name()
+                                .map_err(|e| anyhow::anyhow!("pyo3 get type name fail: {:#?}", e))?
+                                .to_string(),
+                            location: current_node.to_owned(),
+                            r#async: false,
+                            ..Default::default()
+                        };
     
-            Ok(ret?)
+                        try_extract_native_value(obj.as_ref(py), &mut ret, &mem_c, &current_node)
+                            .map_err(|e| {
+                                anyhow::anyhow!("try_extract_native_value should not failed:{:#?}", e)
+                            })?;
+                        mem_c.insert(Some(id), LazyPyObject::new_object(obj));
+    
+                        Ok(ret)
+                    }
+                    Err(err) => {
+                        let err = crate::utils::dumps(&pickle, py, err)
+                            .map_err(|e| anyhow::anyhow!("dump failed:{:#?}", e))?;
+                        Ok(NodeObject {
+                            exception: err.into(),
+                            location: current_node.to_owned(),
+                            ..Default::default()
+                        })
+                    }
+                };
+        
+                Ok(ret?)
+            })
         })
         .await?;
         let end_of_execution = std::time::Instant::now();
@@ -226,11 +227,14 @@ async fn run_async(
     record.duration_get_target_object = Some(end_of_fetch - current);
     current = end_of_fetch;
     let result: crate::error::Result<PyObject> = tokio::task::spawn_blocking(move || {
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-        let result = loads(&pickle, py, result.data.as_ref())?;
+        Python::with_gil(|py|{
+            let result = loads(&pickle, py, result.data.as_ref())?;
 
-        Ok(result)
+            Ok(result)
+        })
+        // let gil = Python::acquire_gil();
+        // let py = gil.python();
+
     })
     .await?;
 

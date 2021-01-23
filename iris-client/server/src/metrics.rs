@@ -9,6 +9,8 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::command::{get_attr, send};
+
 #[derive(Clone)]
 pub struct DistributedTraffic {
     pub nodes: Arc<DashMap<SocketAddr, TrafficCounter>>,
@@ -151,6 +153,16 @@ impl ExecutionMeter {
             }
         }
     }
+
+    pub fn clear(&self) {
+        self.total.clear();
+        self.call.clear();
+        self.send.clear();
+        self.get_attr.clear();
+        self.create_object.clear();
+        self.apply.clear();
+        self.get_remote_object.clear();
+    }
 }
 
 #[derive(Default, Clone)]
@@ -223,6 +235,16 @@ macro_rules! add {
     };
 }
 
+#[macro_use]
+macro_rules! clear {
+    ($self:ident, $i:ident) => {
+        paste::paste! {
+            $self.[<count_$i>].store(0, Ordering::SeqCst);
+            $self.[<duration_$i>].store(0, Ordering::SeqCst);
+        }
+    };
+}
+
 impl Record {
     pub fn add(&self, r: &SingleCommand) {
         add!(self, r, all);
@@ -230,6 +252,14 @@ impl Record {
         add!(self, r, get_target_object);
         add!(self, r, after);
         add!(self, r, prepare);
+    }
+
+    pub fn clear(&self) {
+        clear!(self, all);
+        clear!(self, execution);
+        clear!(self, get_target_object);
+        clear!(self, after);
+        clear!(self, prepare);
     }
 }
 

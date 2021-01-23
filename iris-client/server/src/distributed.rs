@@ -75,18 +75,18 @@ impl N2n for NodeServer {
         let object = o.unwrap();
         let node = self.node_addr.get(&addr).unwrap().value().clone();
         let object = tokio::task::spawn_blocking(move || {
-            let gil = Python::acquire_gil();
-            let py = gil.python();
-            let pickle = pickle.to_object(py);
-            objects.insert_out_ref(request.id, node);
-            let mut object = object.get(&pickle,py).unwrap();
-            for attr in request.attr {
-                object = object.getattr(py, attr).unwrap();
-            }
-            crate::utils::dbg_py(py,crate::utils::dumps(&pickle, py, object)).unwrap()
+            Python::with_gil(|py|{
+                let pickle = pickle.to_object(py);
+                objects.insert_out_ref(request.id, node);
+                let mut object = object.get(&pickle,py).unwrap();
+                for attr in request.attr {
+                    object = object.getattr(py, attr).unwrap();
+                }
+                crate::utils::dbg_py(py,crate::utils::dumps(&pickle, py, object)).unwrap()
+            })
         })
         .await.unwrap();
         s.send(());
-        return Ok(Response::new(n2n::Value { data: object }));
+        return Ok(Response::new(n2n::Value { data: object.into() }));
     }
 }

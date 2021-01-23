@@ -230,28 +230,33 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
 
             let mem_c = mem.clone();
             let blocking_task: crate::error::Result<_> = tokio::task::spawn_blocking(move || {
-                let gil = Python::acquire_gil();
-                let py = gil.python();
-                let o = match o.map(|x| x.get(&pickle, py)) {
-                    Some(Ok(obj)) => Some(obj),
-                    Some(Err(err)) => {
-                        return Err(err.into());
-                    }
-                    None => None,
-                };
+                Python::with_gil(|py|{
+                    let o = match o.map(|x| x.get(&pickle, py)) {
+                        Some(Ok(obj)) => Some(obj),
+                        Some(Err(err)) => {
+                            return Err(err.into());
+                        }
+                        None => None,
+                    };
+    
+                    let result = T::new(request, result, id, o).run(py, &pickle);
+    
+                    match result {
+                        Ok(obj) => {
+                            mem_c.insert(Some(id), LazyPyObject::new_object(obj));
+                        }
+                        Err(error) => {
+                            return Err(error);
+                        }
+                    };
 
-                let result = T::new(request, result, id, o).run(py, &pickle);
+                    Ok(())
+                })
+                // let gil = Python::acquire_gil();
+                // let py = gil.python();
+                
 
-                match result {
-                    Ok(obj) => {
-                        mem_c.insert(Some(id), LazyPyObject::new_object(obj));
-                    }
-                    Err(error) => {
-                        return Err(error);
-                    }
-                };
-
-                Ok(())
+                // Ok(())
             })
             .await?;
             let end_of_execution = std::time::Instant::now();
@@ -280,10 +285,10 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
                 }
                 Ok(Err(err)) => match err {
                     crate::error::Error::UserPyError { source, backtrace } => {
-                        let gil = Python::acquire_gil();
-                        let py = gil.python();
-                        let pytraceback = source.ptraceback(py).and_then(|x|x.repr().ok());
-                        warn!(target=id, "{:#?} {:#?} {:#?}", source, pytraceback, backtrace);
+                        Python::with_gil(|py|{
+                            let pytraceback = source.ptraceback(py).and_then(|x|x.repr().ok());
+                            warn!(target=id, "{:#?} {:#?} {:#?}", source, pytraceback, backtrace);
+                        });
                     }
                     _ => {
                         warn!(target = id, "{:#?}", err);
@@ -380,52 +385,55 @@ impl<T: ControlCommand + 'static> ControlCommandTask<T> {
 
         let mem_c = mem.clone();
         let r = tokio::task::spawn_blocking(move || {
-            let gil = Python::acquire_gil();
-            let py = gil.python();
-            let o = match o.map(|x| x.get(&pickle, py)) {
-                Some(Ok(obj)) => Some(obj),
-                Some(Err(err)) => {
-                    return Err(err.into());
+            Python::with_gil(|py|{
+                let o = match o.map(|x| x.get(&pickle, py)) {
+                    Some(Ok(obj)) => Some(obj),
+                    Some(Err(err)) => {
+                        return Err(err.into());
+                    }
+                    None => None,
+                };
+    
+                let result = T::new(request, result, id, o).run(py, &pickle);
+    
+                match result {
+                    Ok(obj) => {
+                        let mut ret = NodeObject {
+                            id,
+                            r#type: obj
+                                .as_ref(py)
+                                .get_type()
+                                .name()
+                                .map_err(|e| anyhow!("pyo3 get type name fail: {:#?}", e))?
+                                .to_string(),
+                            location: current_node.to_owned(),
+                            r#async: false,
+                            ..Default::default()
+                        };
+    
+                        try_extract_native_value(obj.as_ref(py), &mut ret, &mem_c, &current_node)
+                            .map_err(|e| {
+                                anyhow!("try_extract_native_value should not failed:{:#?}", e)
+                            })?;
+                        mem_c.insert(Some(id), LazyPyObject::new_object(obj));
+    
+                        Ok(ret)
+                    }
+                    Err(crate::error::Error::UserPyError { source, backtrace }) => {
+                        let err = crate::utils::dumps(&pickle, py, source)
+                            .map_err(|e| anyhow!("dump failed:{:#?}", e))?;
+                        Ok(NodeObject {
+                            exception: err.into(),
+                            location: current_node.to_owned(),
+                            ..Default::default()
+                        })
+                    }
+                    Err(error) => Err(error),
                 }
-                None => None,
-            };
-
-            let result = T::new(request, result, id, o).run(py, &pickle);
-
-            match result {
-                Ok(obj) => {
-                    let mut ret = NodeObject {
-                        id,
-                        r#type: obj
-                            .as_ref(py)
-                            .get_type()
-                            .name()
-                            .map_err(|e| anyhow!("pyo3 get type name fail: {:#?}", e))?
-                            .to_string(),
-                        location: current_node.to_owned(),
-                        r#async: false,
-                        ..Default::default()
-                    };
-
-                    try_extract_native_value(obj.as_ref(py), &mut ret, &mem_c, &current_node)
-                        .map_err(|e| {
-                            anyhow!("try_extract_native_value should not failed:{:#?}", e)
-                        })?;
-                    mem_c.insert(Some(id), LazyPyObject::new_object(obj));
-
-                    Ok(ret)
-                }
-                Err(crate::error::Error::UserPyError { source, backtrace }) => {
-                    let err = crate::utils::dumps(&pickle, py, source)
-                        .map_err(|e| anyhow!("dump failed:{:#?}", e))?;
-                    Ok(NodeObject {
-                        exception: err,
-                        location: current_node.to_owned(),
-                        ..Default::default()
-                    })
-                }
-                Err(error) => Err(error),
-            }
+            })
+            // let gil = Python::acquire_gil();
+            // let py = gil.python();
+            
         })
         .await?;
 

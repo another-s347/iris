@@ -8,7 +8,8 @@ edition = "2018"
 
 [dependencies]
 rayon = "1.0.2"
-pyo3 = { version="0.13", features = ["extension-module"] }
+bytes = "1.0"
+pyo3 = { git="https://github.com/PyO3/pyo3.git", features = ["extension-module"] }
 tokio = { version="1.0", features = ["full"] }
 tonic = "0.4"
 futures = "0.3"

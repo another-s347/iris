@@ -12,7 +12,7 @@ use pyo3::{PyObject, PyResult, Python};
 
 pub struct SendCommand {
     id: u64,
-    body: Vec<u8>,
+    body: bytes::Bytes,
 }
 
 impl super::ControlCommandRequest for SendRequest {

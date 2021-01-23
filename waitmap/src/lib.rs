@@ -249,6 +249,10 @@ impl<K: Hash + Eq, V, S: BuildHasher + Clone> WaitMap<K, V, S> {
             } else { true }
         })
     }
+
+    pub fn clear(&self) {
+        self.map.clear()
+    }
 }
 
 enum WaitEntry<V> {

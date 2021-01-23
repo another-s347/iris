@@ -82,6 +82,7 @@ impl Greeter for IrisServer {
         self.modules.clear();
         self.nodes.clear();
         self.nodes_addr.clear();
+        self.metrics.clear();
         return Ok(Response::new(Null {}));
     }
 
@@ -128,7 +129,7 @@ impl Greeter for IrisServer {
         if let Err(err) = self.import_modules(py, modules, paths) {
             warn!("{:?}", err);
             return Ok(Response::new(NodeObject {
-                exception: dumps(&pickle, py, err).unwrap(),
+                exception: dumps(&pickle, py, err).unwrap().into(),
                 location: self.current_node.as_str().to_owned(),
                 ..Default::default()
             }));
@@ -288,24 +289,24 @@ impl Greeter for IrisServer {
         let data = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tokio::task::spawn_blocking(move || {
-                let gil = Python::acquire_gil();
-                let py = gil.python();
-                let pickle = pickle.to_object(py);
-                // let maps = &self.objects; //.lock().unwrap();
-                let mut obj = obj.get(&pickle, py).unwrap();
-                for attr in request.attr {
-                    obj = obj.getattr(py, attr).unwrap();
-                }
-
-                dumps(&pickle, py, obj).unwrap()
+                Python::with_gil(|py|{
+                    let pickle = pickle.to_object(py);
+                    // let maps = &self.objects; //.lock().unwrap();
+                    let mut obj = obj.get(&pickle, py).unwrap();
+                    for attr in request.attr {
+                        obj = obj.getattr(py, attr).unwrap();
+                    }
+    
+                    dumps(&pickle, py, obj).unwrap()
+                })
             }),
         )
         .await
         .unwrap()
         .unwrap();
         s.send(());
-        return Ok(Response::new(Value { data }));
-    }
+        return Ok(Response::new(Value { data: data.into() }));
+    }   
 
     async fn sync_object(
         &self,

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 // #![feature(async_closure)]
 use common::IrisObjectId;
 use futures::future::join_all;
@@ -262,7 +263,7 @@ impl IrisObjectInternal {
         });
     }
 
-    fn _get_value(&self, request: NodeObjectRef) -> Option<Vec<u8>> {
+    fn _get_value(&self, request: NodeObjectRef) -> Option<Bytes> {
         let task_handle = self.inner.runtime_handle.block_on(
             self.inner
                 .client
@@ -481,7 +482,7 @@ impl IrisClientInternal {
             r#async:go_async,
             after: list_to_after_list(after_list, py)?
         });
-        let request = ApplyRequest { arg, func, options };
+        let request = ApplyRequest { arg, func: bytes::Bytes::from(func), options };
         Ok(py.allow_threads(|| self._apply(request)))
     }
 
@@ -496,7 +497,7 @@ impl IrisClientInternal {
             r#async:go_async,
             after: list_to_after_list(after_list, py)?
         });
-        let request = SendRequest { func, options };
+        let request = SendRequest { func: func.into(), options };
         Ok(py.allow_threads(|| self._send(request)))
     }
 
@@ -827,7 +828,7 @@ fn tuple_to_proto(
             vec.push(proto_py_any::Data::Dict(dict));
         } else {
             let bytes = serialize(pickle, py, a).unwrap();
-            vec.push(proto_py_any::Data::Bytes(bytes));
+            vec.push(proto_py_any::Data::Bytes(bytes.into()));
         }
     }
     (
@@ -919,7 +920,7 @@ fn list_to_proto(
             vec.push(proto_py_any::Data::Dict(dict));
         } else {
             let bytes = serialize(pickle, py, a).unwrap();
-            vec.push(proto_py_any::Data::Bytes(bytes));
+            vec.push(proto_py_any::Data::Bytes(bytes.into()));
         }
     }
     ProtoPyList {
@@ -1031,7 +1032,7 @@ fn dict_to_proto(
             vec.insert(
                 key,
                 ProtoPyAny {
-                    data: Some(proto_py_any::Data::Bytes(bytes)),
+                    data: Some(proto_py_any::Data::Bytes(bytes.into())),
                 },
             );
         }

@@ -1,5 +1,13 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::compile_protos("proto/helloworld/helloworld.proto")?;
-    tonic_build::compile_protos("proto/n2n/n2n.proto")?;
+    let mut config = prost_build::Config::new();
+    config.bytes(&["."]);
+    tonic_build::configure()
+        .compile_with_config(config, &[
+            "proto/helloworld/helloworld.proto",
+            "proto/n2n/n2n.proto"
+        ], &[
+            "proto/helloworld",
+            "proto/n2n"
+        ])?;
     Ok(())
 }

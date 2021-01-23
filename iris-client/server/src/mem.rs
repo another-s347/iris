@@ -215,7 +215,7 @@ impl Mem {
     }
 
     pub fn clear(&self) {
-        self.objects.cancel_all();
+        self.objects.clear();
         self.in_ref.clear();
         self.out_ref.clear();
         self.queue.clear();
