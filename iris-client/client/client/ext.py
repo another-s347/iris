@@ -1,4 +1,6 @@
 from typing import Any, List, Optional
+
+from torch.nn.modules import module
 from .client import IrisContextInternal, IrisObjectId, IrisObjectInternal, IrisClientInternal
 import dill
 import sys
@@ -9,6 +11,7 @@ from inspect import Traceback, getframeinfo, stack
 import functools
 import contextvars
 import threading
+import copy
 from typing import TypeVar
 
 T = TypeVar('T')
@@ -26,6 +29,7 @@ class ProxyModule:
 
     def __getattr__(self, name):
         # Check
+        # return getattr(self.module, name)
         return ProxyAttr(self.module, getattr(self.module, name), self.ctx, self.node)
 
 
@@ -41,6 +45,10 @@ class ProxyAttr:
         if node is None:
             raise NotImplementedError()
             # return self.object(*args, **kwargs)
+        if node.ip == "local":
+            r_args, holds_ref = retrieve_args(self, self.ctx, args)
+            obj = self.object(*r_args, **kwargs)
+            return IrisObject(obj, node, node.ctx, None, None, i_stack=2)
         if self.object.__module__:
             return node.create_object_by_name(
                 self.object.__module__,
@@ -130,6 +138,10 @@ class IrisContext:
         return node.create_object(module,  *args, **kwargs)
 
     def create_node(self, name, ip="127.0.0.1", port=None) -> 'IrisNode':
+        if ip == "local":
+            node = IrisNode(name, ip, port, None, self)
+            self.client_wrapper[name] = node
+            return node
         port = port if port else self.ports
         self.ports += 1
         stub = self.inner.connect(
@@ -155,10 +167,12 @@ class IrisNode:
         self.ip: str = ip
         self.port: int = port
         self.stub = stub
-        self.internal_name: str = f"node{ip}:{port}"
+        self.internal_name: str = f"node{ip}:{port}" if ip != "local" else f"{name}_local"
         self.ctx = ctx
 
     def connect(self, node1: 'IrisNode', bi: bool = False):
+        if self.ip == "local":
+            return
         self.stub.connect_nodes({
             node1.internal_name: f"{node1.ip}:{node1.port}"
         })
@@ -169,6 +183,14 @@ class IrisNode:
         return f"{self.name}#{self.internal_name}"
 
     def create_object_by_name(self, module_name, qual_name,  *args, **kwargs) -> 'IrisObject':
+        if self.ip == "local":
+            try:
+                m = getattr(globals()[module_name], qual_name)
+            except:
+                m = getattr(eval(module_name), qual_name)
+            r_args, holds_ref = retrieve_args(self, self.ctx, args)
+            obj = m(*r_args, **kwargs)
+            return IrisObject(obj, self, self.ctx, args, kwargs, i_stack=3)
         r_args, holds_ref = retrieve_args(self, self.ctx, args)
         r = self.stub.create_object(
             module=module_name,
@@ -187,6 +209,10 @@ class IrisNode:
         return IrisObject(r, self, self.ctx, args, kwargs, i_stack=3)
 
     def create_object(self, module,  *args, **kwargs) -> 'IrisObject':
+        if self.ip == "local":
+            r_args, holds_ref = retrieve_args(self, self.ctx, args)
+            obj = module(*r_args, **kwargs)
+            return IrisObject(obj, self, self.ctx, args, kwargs, i_stack=3)
         r_args, holds_ref = retrieve_args(self, self.ctx, args)
         r = self.stub.create_object(
             module=module.__module__,
@@ -205,6 +231,10 @@ class IrisNode:
         return IrisObject(r, self, self.ctx, args, kwargs, i_stack=3)
 
     def apply(self, func, args, kwargs) -> 'IrisObject':
+        if self.ip == "local":
+            r_args, holds_ref = retrieve_args(self, self.ctx, args)
+            obj = func(*r_args, **kwargs)
+            return IrisObject(obj, self, self.ctx, args, kwargs, i_stack=3)
         r_args, holds_ref = retrieve_args(self, self.ctx, args)
         r = self.stub.apply(
             func=dill.dumps(func),
@@ -221,7 +251,9 @@ class IrisNode:
             raise exception
         return IrisObject(r, self, self.ctx, args, kwargs, i_stack=2)
 
-    def get_remote_object(self, obj) -> 'IrisObject':
+    def get_remote_object(self, obj: 'IrisObject') -> 'IrisObject':
+        if self.ip == "local":
+            return obj
         r = self.stub.get_remote_object(obj.inner, go_async=self.ctx.config.go_async,
                                         after_list=self.ctx.control_context.get().get_last_task())
         if self.ctx.config.go_async_sequence:
@@ -232,6 +264,8 @@ class IrisNode:
         return IrisObject(r, self, self.ctx, None, None, i_stack=2)
 
     def send(self, obj) -> 'IrisObject':
+        if self.ip == "local":
+            return IrisObject(obj, self, self.ctx, None, None, i_stack=3)
         bytes = dill.dumps(obj)
         r = self.stub.send(bytes, go_async=self.ctx.config.go_async,
                                                     after_list=self.ctx.control_context.get().get_last_task())
@@ -243,18 +277,25 @@ class IrisNode:
         return IrisObject(r, self, self.ctx, None, None, i_stack=2)
 
     def close(self):
-        self.stub.close()
+        if self.stub:
+            self.stub.close()
 
 
 class IrisObject:
-    def __init__(self, inner: IrisObjectInternal, node: 'IrisNode', ctx: IrisContext, args, kwargs, attrs=[], i_stack=1):
+    def __init__(self, inner, node: 'IrisNode', ctx: IrisContext, args, kwargs, attrs=[], i_stack=1):
         super().__init__()
-        self.inner: IrisObjectInternal = inner
+        if isinstance(inner, IrisObject):
+            raise NotImplementedError()
+        if isinstance(inner, IrisObjectInternal):
+            self.inner: IrisObjectInternal = inner
+            self.value: Any = inner.get_native_value()
+            self.type = inner.get_type()
+            self.id: IrisObjectId = inner.id()
+        else:
+            self.value: Any = inner
+            self.type = str(type(inner))
         self.node: 'IrisNode' = node
         self.ctx: IrisContext = ctx
-        self.id: IrisObjectId = inner.id()
-        self.value: Any = inner.get_native_value()
-        self.type = inner.get_type()
         self.args = args
         self.kwargs = kwargs
         self.attrs: List[str] = attrs
@@ -263,13 +304,18 @@ class IrisObject:
 
     def log(self, msg, i_stack=2):
         if self.ctx.config.debug:
-            if i_stack is None:
-                self.inner.log("", 0, msg)
+            if self.node.ip == "local":
+                print(msg)
             else:
-                source = getframeinfo(stack()[i_stack][0])
-                self.inner.log(source.filename, source.lineno, msg)
+                if i_stack is None:
+                    self.inner.log("", 0, msg)
+                else:
+                    source = getframeinfo(stack()[i_stack][0])
+                    self.inner.log(source.filename, source.lineno, msg)
 
     def __repr__(self):
+        if self.node.ip == "local":
+            return self.value.__repr__()
         if self.ctx.config.debug:
             return f"Remote Object #{self.inner.id().id} on {self.node}, Type {self.type}, at {self.source.filename}:{self.source.lineno}"
         else:
@@ -280,13 +326,17 @@ class IrisObject:
     """
 
     def get(self):
-        if self.value:
+        if self.value is not None:
             return self.value
         data = self.inner.get_value(self.attrs)
         return dill.loads(data)
 
     def __call__(self, *args, **kwargs) -> 'IrisObject':
-        if self.value:
+        if self.value is not None:
+            if self.node.ip == "local":
+                r_args, holds_ref = retrieve_args(self, self.ctx, args)
+                obj = self.value(*r_args, **kwargs)
+                return IrisObject(obj, self.node, self.ctx, args, kwargs, i_stack=2)
             raise NotImplementedError()
         r_args, holds_ref = retrieve_args(self, self.ctx, args)
         self.log("call")
@@ -306,8 +356,12 @@ class IrisObject:
         self.log(f"CALL => {r.id().id}", i_stack=2)
         return IrisObject(r, self.node, self.ctx, args, kwargs, i_stack=2)
 
-    def _call_with_attr(self, attr: str, go_async: bool, args, kwargs={}, i_stack=3) -> 'IrisObject':
-        if self.value:
+    def _call_with_attr(self, attr: str, go_async: bool, args=[], kwargs={}, i_stack=3) -> 'IrisObject':
+        if self.value is not None:
+            if self.node.ip == "local":
+                r_args, holds_ref = retrieve_args(self, self.ctx, args)
+                obj = getattr(self.value, attr)(*r_args, **kwargs)
+                return IrisObject(obj, self.node, self.ctx, args, kwargs, i_stack=i_stack)
             if args == None:
                 return getattr(self.value, attr)()
             return getattr(self.value, attr)(*args)
@@ -331,11 +385,15 @@ class IrisObject:
         return self._call_with_attr('keys', go_async=self.ctx.config.go_async, args=None)
 
     def to_node(self, node: 'IrisNode'):
+        if self.node.ip == "local":
+            return IrisObject(copy.deepcopy(self.value), node, self.ctx, None, None, i_stack=2)
         if node.name == self.node.name:
             return self
         return node.get_remote_object(self)
 
     def __getattr__(self, attr):
+        if self.node.ip == "local":
+            return IrisObject(getattr(self.value, attr), self.node, self.ctx, None, None, i_stack=2)
         # TODO: add options
         if True:
             r = self.inner.get_attr([attr], go_async=self.ctx.config.go_async,
@@ -364,10 +422,10 @@ class IrisObject:
     # TODO: Add more magic methods
 
     def __len__(self):
-        return self._call_with_attr('__len__', go_async=self.ctx.config.go_async, args=None)
+        return self._call_with_attr('__len__', go_async=self.ctx.config.go_async, args=())
 
     def __iter__(self):
-        return self._call_with_attr('__iter__', go_async=self.ctx.config.go_async, args=None)
+        return self._call_with_attr('__iter__', go_async=self.ctx.config.go_async, args=())
         # return AsyncIterator(self._call_with_attr('__iter__',go_async=self.ctx.config.go_async, args=None))
 
     def __getitem__(self, key):
@@ -380,20 +438,22 @@ class IrisObject:
         return self._call_with_attr('__delitem__', go_async=self.ctx.config.go_async, args=(key,))
 
     def __reversed__(self):
-        return self._call_with_attr('__reversed__', go_async=self.ctx.config.go_async, args=None)
+        return self._call_with_attr('__reversed__', go_async=self.ctx.config.go_async, args=())
 
     def __contains__(self, item):
         return self._call_with_attr('__contains__', go_async=self.ctx.config.go_async, args=(item,))
 
     def __next__(self):
-        return self._call_with_attr('__next__', go_async=False, args=None)
+        return self._call_with_attr('__next__', go_async=False, args=())
 
     def __index__(self):
-        if self.value:
+        if self.value is not None:
             return getattr(self.value, '__index__')()
-        return self._call_with_attr('__index__', go_async=self.ctx.config.go_async, args=None).get()
+        return self._call_with_attr('__index__', go_async=self.ctx.config.go_async, args=()).get()
 
     def __del__(self):
+        if self.node.ip == "local":
+            return
         self.log("del", i_stack=None)
         self.inner.del_obj(go_async=self.ctx.config.go_async,
                            after_list=self.ctx.control_context.get().get_last_task())
@@ -442,7 +502,10 @@ class RemoteTensorGroup:
         self.inputs.append((this, source))
 
     def add_output(self, tensor: 'IrisObject'):
-        object_id = tensor.id.id
+        if tensor.node.ip == "local":
+            object_id = id(tensor.value)
+        else:
+            object_id = tensor.id.id
         if object_id in self.outputs:
             self.outputs[object_id][0] += 1
         else:
@@ -451,7 +514,10 @@ class RemoteTensorGroup:
     def backward(self, tensor, grad):
         if isinstance(tensor, IrisObjectWrapper):
             tensor = tensor.object
-        object_id = tensor.id.id
+        if tensor.node.ip == "local":
+            object_id = id(tensor.value)
+        else:
+            object_id = tensor.id.id
         if self.outputs[object_id][0] == 1:
             self.outputs[object_id][1].backward(grad)
         else:
@@ -492,6 +558,8 @@ class IrisModel:
         self.model = model
 
     def forward(self, *args):
+        if self.model.node.ip == "local":
+            return self.model(*args)
         r_args = []
         input_pair = []
         group = RemoteTensorGroup()
@@ -521,11 +589,17 @@ def retrieve_args(self, ctx, args, cls=tuple):
     holds_ref = []
     for arg in args:
         if isinstance(arg, IrisObjectWrapper):
-            x = arg.object.id.add_attr(arg.object.attrs)
-            a.append(x)
+            if arg.node == "local":
+                a.append(arg.object.value)
+            else:
+                x = arg.object.id.add_attr(arg.object.attrs)
+                a.append(x)
         elif isinstance(arg, IrisObject):
-            x = arg.id.add_attr(arg.attrs)
-            a.append(x)
+            if arg.node.ip == "local":
+                a.append(arg.value)
+            else:
+                x = arg.id.add_attr(arg.attrs)
+                a.append(x)
         elif isinstance(arg, list):
             rr = retrieve_args(self, ctx, a,  list)
             holds_ref.extend(rr[1])
@@ -550,6 +624,9 @@ class RemoteFunction:
 
     def to_node(self, node: 'IrisNode'):
         ctx = node.ctx
+        if node.ip == "local":
+            self.cache_objects[node] = IrisObject(self.func, node, ctx, None, None, i_stack=2)
+            return
         r = ctx.client_wrapper[node.name].stub.send(self.func_bytes, go_async=ctx.config.go_async,
                                                     after_list=ctx.control_context.get().get_last_task())
         if ctx.config.go_async_sequence:
@@ -596,6 +673,9 @@ class RemoteTensorFunction:
 
     def to_node(self, node: 'IrisNode'):
         ctx = node.ctx
+        if node.ip == "local":
+            self.cache_objects[node] = _RTF(IrisObject(self.func, node, ctx, None, None, i_stack=2), node)
+            return
         r = ctx.client_wrapper[node.name].stub.send(self.func_bytes, go_async=ctx.config.go_async,
                                                     after_list=ctx.control_context.get().get_last_task())
         if ctx.config.go_async_sequence:
