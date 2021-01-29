@@ -1,4 +1,5 @@
 from typing import Any, List, Optional
+import torch
 
 from torch.nn.modules import module
 from .client import IrisContextInternal, IrisObjectId, IrisObjectInternal, IrisClientInternal
@@ -46,7 +47,7 @@ class ProxyAttr:
             raise NotImplementedError()
             # return self.object(*args, **kwargs)
         if node.ip == "local":
-            r_args, holds_ref = retrieve_args(self, self.ctx, args)
+            r_args, holds_ref = retrieve_args(node, self.ctx, args)
             obj = self.object(*r_args, **kwargs)
             return IrisObject(obj, node, node.ctx, None, None, i_stack=2)
         if self.object.__module__:
@@ -131,6 +132,11 @@ class IrisContext:
     def setup(self):
         n0 = self.create_node("node0", "127.0.0.1", port=12345)
         n1 = self.create_node("node1", "127.0.0.1", port=12346)
+        n0.connect(n1, bi=True)
+
+    def setup_local(self):
+        n0 = self.create_node("node0", "local", port=12345)
+        n1 = self.create_node("node1", "local", port=12346)
         n0.connect(n1, bi=True)
 
     def create_object(self, node_name: str, module,  *args, **kwargs) -> 'IrisObject':
@@ -334,11 +340,11 @@ class IrisObject:
     def __call__(self, *args, **kwargs) -> 'IrisObject':
         if self.value is not None:
             if self.node.ip == "local":
-                r_args, holds_ref = retrieve_args(self, self.ctx, args)
+                r_args, holds_ref = retrieve_args(self.node, self.ctx, args)
                 obj = self.value(*r_args, **kwargs)
                 return IrisObject(obj, self.node, self.ctx, args, kwargs, i_stack=2)
             raise NotImplementedError()
-        r_args, holds_ref = retrieve_args(self, self.ctx, args)
+        r_args, holds_ref = retrieve_args(self.node, self.ctx, args)
         self.log("call")
         r = self.inner.call(
             b_args=r_args,
@@ -359,13 +365,13 @@ class IrisObject:
     def _call_with_attr(self, attr: str, go_async: bool, args=[], kwargs={}, i_stack=3) -> 'IrisObject':
         if self.value is not None:
             if self.node.ip == "local":
-                r_args, holds_ref = retrieve_args(self, self.ctx, args)
+                r_args, holds_ref = retrieve_args(self.node, self.ctx, args)
                 obj = getattr(self.value, attr)(*r_args, **kwargs)
                 return IrisObject(obj, self.node, self.ctx, args, kwargs, i_stack=i_stack)
             if args == None:
                 return getattr(self.value, attr)()
             return getattr(self.value, attr)(*args)
-        r_args, holds_ref = retrieve_args(self, self.ctx, args)
+        r_args, holds_ref = retrieve_args(self.node, self.ctx, args)
         r = self.inner.call(
             b_args=r_args,
             b_kwargs=kwargs,
@@ -386,7 +392,10 @@ class IrisObject:
 
     def to_node(self, node: 'IrisNode'):
         if self.node.ip == "local":
-            return IrisObject(copy.deepcopy(self.value), node, self.ctx, None, None, i_stack=2)
+            if isinstance(self.value, torch.Tensor):
+                return IrisObject(copy.deepcopy(self.value.detach()), node, self.ctx, None, None, i_stack=2)
+            else:
+                return IrisObject(copy.deepcopy(self.value), node, self.ctx, None, None, i_stack=2)
         if node.name == self.node.name:
             return self
         return node.get_remote_object(self)
@@ -558,8 +567,8 @@ class IrisModel:
         self.model = model
 
     def forward(self, *args):
-        if self.model.node.ip == "local":
-            return self.model(*args)
+        # if self.model.node.ip == "local":
+        #     return self.model(*args)
         r_args = []
         input_pair = []
         group = RemoteTensorGroup()
@@ -567,6 +576,9 @@ class IrisModel:
             if isinstance(a, RemoteTensor):
                 if a.object.node != self.model.node:
                     this = a.object.to_node(self.model.node)
+                    if a.object.node.ip == "local":
+                        this.requires_grad_(True)
+                        a.object.detach()
                     group.add_input(a, this)
                     r_args.append(this)
                 else:
@@ -582,33 +594,45 @@ class IrisModel:
         return self.forward(*args)
 
 
-def retrieve_args(self, ctx, args, cls=tuple):
+def retrieve_args(node, ctx, args, cls=tuple):
     if args is None:
         return None, None
     a = []
     holds_ref = []
     for arg in args:
         if isinstance(arg, IrisObjectWrapper):
-            if arg.node == "local":
-                a.append(arg.object.value)
+            if arg.node.ip == "local":
+                if arg.node.name == node.name:
+                    a.append(arg.object.value)
+                else:
+                    if isinstance(arg.object.value, torch.Tensor):
+                        a.append(copy.deepcopy(arg.object.value.detach()))
+                    else:
+                        a.append(copy.deepcopy(arg.object.value))
             else:
                 x = arg.object.id.add_attr(arg.object.attrs)
                 a.append(x)
         elif isinstance(arg, IrisObject):
             if arg.node.ip == "local":
-                a.append(arg.value)
+                if arg.node.name == node.name:
+                    a.append(arg.value)
+                else:
+                    if isinstance(arg.value, torch.Tensor):
+                        a.append(copy.deepcopy(arg.value.detach()))
+                    else:
+                        a.append(copy.deepcopy(arg.value))
             else:
                 x = arg.id.add_attr(arg.attrs)
                 a.append(x)
         elif isinstance(arg, list):
-            rr = retrieve_args(self, ctx, a,  list)
+            rr = retrieve_args(node, ctx, a,  list)
             holds_ref.extend(rr[1])
             a.append(rr[0])
         elif isinstance(arg, dict):
             a.append(arg)
             # raise NotImplementedError(arg)
         elif isinstance(arg, tuple):
-            rr = retrieve_args(self, ctx,  a)
+            rr = retrieve_args(node, ctx,  a)
             holds_ref.extend(rr[1])
             a.append(rr[0])
         else:
