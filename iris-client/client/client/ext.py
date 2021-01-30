@@ -271,7 +271,7 @@ class IrisNode:
 
     def send(self, obj) -> 'IrisObject':
         if self.ip == "local":
-            return IrisObject(obj, self, self.ctx, None, None, i_stack=3)
+            return IrisObject(copy.deepcopy(obj), self, self.ctx, None, None, i_stack=3)
         bytes = dill.dumps(obj)
         r = self.stub.send(bytes, go_async=self.ctx.config.go_async,
                                                     after_list=self.ctx.control_context.get().get_last_task())
