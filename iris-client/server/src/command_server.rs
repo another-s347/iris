@@ -83,7 +83,9 @@ impl Greeter for IrisServer {
         self.nodes.clear();
         self.nodes_addr.clear();
         self.metrics.clear();
-        return Ok(Response::new(Null {}));
+        Python::with_gil(|py|{
+            Ok(Response::new(Null {}))
+        })
     }
 
     async fn connect_nodes(
