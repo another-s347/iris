@@ -71,7 +71,7 @@ struct Opt {
     pub color: bool,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let _dhat = Dhat::start_heap_profiling();
     let opt: Opt = Opt::from_args();

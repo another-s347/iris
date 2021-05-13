@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use prost::bytes::Bytes;
-use pyo3::prelude::*;
+use pyo3::{AsPyPointer, prelude::*};
+use tokio::task::spawn_blocking;
 use tracing::{debug, info, log::warn};
 use std::{fmt::Debug, hash::{Hash, Hasher}, sync::atomic::Ordering};
 use std::{
@@ -54,7 +55,7 @@ pub struct Mem {
 #[derive(Clone)]
 pub struct LazyPyObject {
     object: once_cell::sync::OnceCell<PyObject>,
-    inner: LazyPyObjectInner
+    pub inner: LazyPyObjectInner
 }
 
 impl LazyPyObject {
@@ -87,7 +88,7 @@ impl LazyPyObject {
 }
 
 #[derive(Clone)]
-enum LazyPyObjectInner {
+pub enum LazyPyObjectInner {
     Serialized(Bytes),
     PyObject(PyObject),
 }
@@ -191,6 +192,28 @@ impl Mem {
                 }
                 None => {}
             }
+            // match o.map(|x|x.inner) {
+            //     Some(LazyPyObjectInner::PyObject(o)) => {
+            //         unsafe {
+            //             pyo3::ffi::Py_XDECREF(o.as_ptr());
+            //         }
+            //     }
+            //     _ => {}
+            // }
+            // tokio::task::spawn_blocking(move||{
+            //     Python::with_gil(|py|{
+            //         match o.as_ref().map(|x|&x.inner) {
+            //             Some(LazyPyObjectInner::PyObject(o)) => {
+            //                 println!("drop {} {}", o.as_ptr() as usize, id);
+            //                 // println!("> {:?}", o.as_ref(py).repr());
+            //             }
+            //             _ => {
+
+            //             }
+            //         }
+            //         drop(o);
+            //     });
+            // }).await;
             self.out_ref.remove(&Key(id)).map(|(_,x)| x.clone())
         }
         else {

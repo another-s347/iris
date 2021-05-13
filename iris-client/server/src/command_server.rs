@@ -291,16 +291,18 @@ impl Greeter for IrisServer {
         let data = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             tokio::task::spawn_blocking(move || {
-                Python::with_gil(|py|{
-                    let pickle = pickle.to_object(py);
-                    // let maps = &self.objects; //.lock().unwrap();
-                    let mut obj = obj.get(&pickle, py).unwrap();
-                    for attr in request.attr {
-                        obj = obj.getattr(py, attr).unwrap();
-                    }
-    
-                    dumps(&pickle, py, obj).unwrap()
-                })
+                // std::thread::spawn(move||{
+                    Python::with_gil(|py|{
+                        let pickle = pickle.to_object(py);
+                        // let maps = &self.objects; //.lock().unwrap();
+                        let mut obj = obj.get(&pickle, py).unwrap();
+                        for attr in request.attr {
+                            obj = obj.getattr(py, attr).unwrap();
+                        }
+        
+                        dumps(&pickle, py, obj).unwrap()
+                    })
+                // }).join().unwrap()
             }),
         )
         .await
