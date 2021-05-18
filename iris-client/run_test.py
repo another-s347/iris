@@ -56,8 +56,8 @@ for epoch in range(1):
         t_model = client.IrisModel(model)
         t_model2 = client.IrisModel(model2)
         data, target = data[0], data[1]
-        result = model(data)
-        result2 = model2(result)
+        result = t_model(data)
+        result2 = t_model2(result)
         loss = nll_loss.on(result2.node)(result2, target)
         loss.backward()
         optimizer.step()

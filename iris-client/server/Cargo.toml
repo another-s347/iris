@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 common = { path="../common" }
 proto = { path="../proto" }
-pyo3 = { git="https://github.com/PyO3/pyo3.git" }
+pyo3 = { version="0.13.2" }
 tokio = { version="1.0", features = ["full"] }
 tonic = "0.4"
 futures = "0.3"

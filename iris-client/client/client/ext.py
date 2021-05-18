@@ -404,7 +404,7 @@ class IrisObject:
         if self.node.ip == "local":
             return IrisObject(getattr(self.value, attr), self.node, self.ctx, None, None, i_stack=2)
         # TODO: add options
-        if False:
+        if True:
             r = self.inner.get_attr([attr], go_async=self.ctx.config.go_async,
                                     after_list=self.ctx.control_context.get().get_last_task())
             if r.exception():
