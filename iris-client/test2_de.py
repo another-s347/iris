@@ -10,8 +10,8 @@ import itertools
 config = client.IrisConfig()
 # config.go_async = True
 # config.go_async_sequence = True
-config.go_async = False
-config.go_async_sequence = False
+config.go_async = True
+config.go_async_sequence = True
 config.debug = False
 config.log_color = False
 
@@ -61,7 +61,7 @@ for epoch in range(1):
         result = model(data)
         result_r = result.to_node(model2.node).clone().detach().requires_grad_()
         result2 = model2(result_r)
-        loss = c.client_wrapper[result2.node].apply(
+        loss = c.client_wrapper[result2.node.name].apply(
             func = F.nll_loss,
             args = (result2, target),
             kwargs = None
@@ -91,7 +91,7 @@ for epoch in range(1):
         correct += pred3.eq(target.view_as(pred3)).sum().item()
         test_loss /= len_testdataset
 
-        loss = c.client_wrapper[result.node].apply(
+        loss = c.client_wrapper[result.node.name].apply(
             func = F.nll_loss,
             args = (result, target),
             kwargs = None

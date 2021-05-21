@@ -47,14 +47,14 @@ for epoch in range(1):
         train_model2 = client.IrisModel(model2)
         result = train_model(data)
         result = train_model2(result)
-        loss = c.client_wrapper[result.inner.node].apply(
+        loss = c.client_wrapper[result.node.name].apply(
             func = F.nll_loss,
-            args = (result.inner, target),
+            args = (result, target),
             kwargs = None
         )
         result.group.add_output(loss)
         loss = client.RemoteTensor(loss, result.group)
-        loss_value = loss.inner.get()
+        loss_value = loss.get()
         loss.backward()
         optimizer.step()
         optimizer2.step()
@@ -75,7 +75,7 @@ for epoch in range(1):
         correct += pred3.eq(target.view_as(pred3)).sum().item()
         test_loss /= len_testdataset
 
-        loss = c.client_wrapper[result.node].apply(
+        loss = c.client_wrapper[result.node.name].apply(
             func = F.nll_loss,
             args = (result, target),
             kwargs = None
